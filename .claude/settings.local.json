@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__visualize__read_me",
+      "mcp__visualize__show_widget",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(curl -s -i -X OPTIONS http://localhost:8000/book -H \"Origin: http://localhost:54196\" -H \"Access-Control-Request-Method: POST\")",
+      "PowerShell(\\(Get-Item \"C:\\\\Users\\\\bashi\\\\OneDrive\\\\Desktop\\\\New folder\\\\Joins\\\\queue2.0\\\\app.py\"\\).LastWriteTime = Get-Date; Start-Sleep -Seconds 4; curl.exe -s http://localhost:8000/health)",
+      "PowerShell(pip install resend)",
+      "PowerShell(pip install openai)"
+    ]
+  }
+}
