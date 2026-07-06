@@ -38,13 +38,12 @@ from emergency import (
 
 load_dotenv()
 
-# Create app
-app = FastAPI()
+app = FastAPI(title="QueueZero AI", version="1.0")
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://queuezeroai.vercel.app", "http://localhost:3000", "http://localhost:5173"],
+    allow_origins=["https://queuezeroai.vercel.app"],
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -148,17 +147,6 @@ def run_agent(*args, **kwargs):
 # ------------------------------------------------------------------
 # App setup
 # ------------------------------------------------------------------
-app = FastAPI(title="QueueZero AI", version="1.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    # local dev: the Vite dev server may land on any port
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 SESSIONS: dict = {}  # {session_id: ConversationHistory}
 PATIENT_MEMORY = PatientMemory()
 
