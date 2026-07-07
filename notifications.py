@@ -6,6 +6,10 @@ Design rules:
 - send_confirmation_email() NEVER raises. A booking must complete even if the
   email fails, so every failure path logs a warning and returns
   {"sent": False, "error": ...} instead.
+- No module-level per-request state. The recipient is resolved from the
+  request's form value (falling back to the PATIENT_EMAIL env var) via the pure
+  resolve_recipient() helper and passed in explicitly, so concurrent bookings
+  can never leak one patient's email/details into another's.
 - The HTML is a self-contained appointment slip (inline styles, no external
   images) that mirrors the green confirmation card in the UI.
 """
@@ -20,20 +24,17 @@ try:
 except ImportError:  # SDK not installed — degrade gracefully, never crash
     resend = None
 
-# Per-request recipient override, set by app.py from the booking form.
-# Falls back to the PATIENT_EMAIL env var (demo convenience) when unset.
-_RECIPIENT_OVERRIDE = None
 
+def resolve_recipient(form_email):
+    """Recipient for confirmation emails: the per-request form value if present,
+    else the PATIENT_EMAIL env var (demo convenience), else None.
 
-def set_recipient(email):
-    """Set (or clear, with None) the recipient for the current request."""
-    global _RECIPIENT_OVERRIDE
-    _RECIPIENT_OVERRIDE = email.strip() if isinstance(email, str) and email.strip() else None
-
-
-def get_recipient():
-    """Recipient for confirmation emails: form value, else PATIENT_EMAIL env."""
-    return _RECIPIENT_OVERRIDE or os.environ.get("PATIENT_EMAIL", "").strip() or None
+    Pure function — takes the request's email and returns a value. No globals,
+    so it is safe under concurrent requests.
+    """
+    if isinstance(form_email, str) and form_email.strip():
+        return form_email.strip()
+    return os.environ.get("PATIENT_EMAIL", "").strip() or None
 
 
 def _slip_row(label, value):

@@ -6,11 +6,8 @@ Claude decides which of these to call and in what order — this file just
 describes the tools and wires calls through to the real data layer.
 """
 
-import os
-
 import db
 import locations
-import notifications
 
 TOOL_DEFINITIONS = [
     {
@@ -140,44 +137,18 @@ TOOL_DEFINITIONS = [
     },
 ]
 
-# Details of the most recent successful booking in this process, captured by
-# execute_tool so the confirmation email has doctor/hospital/date/time to show.
-_LAST_BOOKING = None
-
-
-def _mock_mode():
-    return os.environ.get("USE_MOCK_AGENT", "false").lower() == "true"
-
-
 def _send_notification(patient_name, message):
     """
-    The agent's notification step. Always logs via the db stub; additionally
-    sends a real confirmation email (Resend) when mock mode is off and we have
-    both a recipient and a captured booking. Email failure never blocks the
-    booking — it's reported in the result instead.
+    The agent's in-conversation notification step — a lightweight log stub only.
+
+    The confirmation *email* is no longer sent here: it is dispatched
+    automatically by the request handler right after a successful booking
+    (see app.py), so it fires unconditionally and per-request rather than
+    depending on the model choosing to call this tool, and without any
+    module-level booking/recipient state that could leak across concurrent
+    requests.
     """
-    result = db.send_notification(patient_name, message)
-
-    if _mock_mode():
-        return result  # mock mode: keep the print-stub behavior only
-
-    to_email = notifications.get_recipient()
-    if not to_email:
-        result["email"] = {"sent": False, "error": "no patient email (form field or PATIENT_EMAIL env)"}
-        return result
-    if not _LAST_BOOKING:
-        result["email"] = {"sent": False, "error": "no booking details captured yet"}
-        return result
-
-    result["email"] = notifications.send_confirmation_email(
-        to_email=to_email,
-        doctor=_LAST_BOOKING.get("doctor_name"),
-        hospital=_LAST_BOOKING.get("hospital_name"),
-        date=_LAST_BOOKING.get("appointment_date"),
-        time=_LAST_BOOKING.get("appointment_time"),
-        est_wait=_LAST_BOOKING.get("estimated_wait_mins"),
-    )
-    return result
+    return db.send_notification(patient_name, message)
 
 
 _DISPATCH = {
@@ -298,18 +269,10 @@ def _sanitize_output(name, output):
 
 
 def execute_tool(name, tool_input):
-    global _LAST_BOOKING
     if name not in _DISPATCH:
         return {"error": f"Unknown tool: {name}"}
     try:
         raw_output = _DISPATCH[name](**tool_input)
-        output = _sanitize_output(name, raw_output)
-        if (
-            name in ("book_slot", "emergency_book")
-            and isinstance(output, dict)
-            and output.get("success")
-        ):
-            _LAST_BOOKING = output
-        return output
+        return _sanitize_output(name, raw_output)
     except Exception as exc:
         return {"error": str(exc)}

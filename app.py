@@ -207,6 +207,31 @@ def _build_extra_system(patient_name: Optional[str], is_emergency: bool) -> Opti
     return "\n\n".join(parts) if parts else None
 
 
+def _send_confirmation_email(appointment: Optional[dict], patient_email: Optional[str]) -> dict:
+    """Send the booking confirmation email for a completed appointment.
+
+    Invoked by the request handlers immediately after a booking is detected in
+    the agent's steps, so delivery is automatic and unconditional -- it never
+    depends on the model choosing to call the send_notification tool. The
+    recipient and appointment details are passed in per-request (no module-level
+    state), so concurrent bookings cannot cross-contaminate each other. Never
+    raises: send_confirmation_email reports any failure in its return value.
+    """
+    if not appointment:
+        return {"sent": False, "error": "no appointment to confirm"}
+    to_email = notifications.resolve_recipient(patient_email)
+    if not to_email:
+        return {"sent": False, "error": "no recipient email (form field or PATIENT_EMAIL env)"}
+    return notifications.send_confirmation_email(
+        to_email=to_email,
+        doctor=appointment.get("doctor_name"),
+        hospital=appointment.get("hospital_name"),
+        date=appointment.get("appointment_date"),
+        time=appointment.get("appointment_time"),
+        est_wait=appointment.get("estimated_wait_mins"),
+    )
+
+
 def extract_appointment_from_steps(steps: List[dict]) -> Optional[dict]:
     """
     Find a successful book_slot / emergency_book in the tool steps and return
@@ -238,10 +263,6 @@ async def book_appointment(req: BookRequest):
     history = _get_session(req.session_id, prefix="sess")
     session_id = history.session_id
 
-    # Recipient for the confirmation email; None clears any previous override
-    # so a request without an email falls back to the PATIENT_EMAIL env var.
-    notifications.set_recipient(req.patient_email)
-
     is_emergency = should_trigger_emergency(req.user_message)
     extra_system = _build_extra_system(req.patient_name, is_emergency)
 
@@ -256,6 +277,13 @@ async def book_appointment(req: BookRequest):
     history.set_messages(result.get("history", []))
 
     appointment = extract_appointment_from_steps(result.get("steps", []))
+
+    if appointment:
+        # Fire the confirmation email automatically, using this request's own
+        # recipient -- independent of whether the agent called send_notification.
+        email_result = _send_confirmation_email(appointment, req.patient_email)
+        if not email_result.get("sent"):
+            print(f"[book] confirmation email not sent: {email_result.get('error')}")
 
     if appointment and req.patient_name:
         PATIENT_MEMORY.save(patient_name=req.patient_name, last_booking=appointment)
@@ -280,8 +308,6 @@ async def emergency_booking(req: EmergencyBookRequest):
     history = _get_session(req.session_id, prefix="emerg")
     session_id = history.session_id
 
-    notifications.set_recipient(req.patient_email)
-
     emergency_message = (
         f"EMERGENCY: {req.reason}. Patient name: {req.patient_name}. "
         f"I need an urgent {req.specialization} appointment now."
@@ -300,6 +326,9 @@ async def emergency_booking(req: EmergencyBookRequest):
 
     appointment = extract_appointment_from_steps(result.get("steps", []))
     if appointment:
+        email_result = _send_confirmation_email(appointment, req.patient_email)
+        if not email_result.get("sent"):
+            print(f"[emergency] confirmation email not sent: {email_result.get('error')}")
         PATIENT_MEMORY.save(patient_name=req.patient_name, last_booking=appointment)
         mark_emergency_booking(appointment, req.reason)
 
@@ -374,6 +403,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             data = await websocket.receive_json()
             user_message = data.get("user_message", "")
             patient_name = data.get("patient_name")
+            patient_email = data.get("patient_email")
             is_emergency = should_trigger_emergency(user_message)
             extra_system = _build_extra_system(patient_name, is_emergency)
 
@@ -394,6 +424,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await websocket.send_json({"type": "tool_call", "step": _jsonable(step)})
 
             appointment = extract_appointment_from_steps(result.get("steps", []))
+            if appointment:
+                email_result = _send_confirmation_email(appointment, patient_email)
+                if not email_result.get("sent"):
+                    print(f"[ws] confirmation email not sent: {email_result.get('error')}")
             await websocket.send_json({
                 "type": "final",
                 "reply": result.get("reply", ""),
