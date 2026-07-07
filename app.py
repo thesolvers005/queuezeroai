@@ -398,53 +398,6 @@ async def health():
 
 
 # ------------------------------------------------------------------
-# Supabase config diagnostics (TEMPORARY -- debugging the live DNS failure)
-#
-# Returns repr() of the configured SUPABASE_URL so hidden whitespace / newlines
-# / quote characters that a dashboard screenshot can't show become visible, plus
-# a raw DNS lookup of the parsed host to isolate an app-level bad-value bug from
-# a container networking/DNS problem. NEVER exposes the service role key -- only
-# a boolean for whether it's present. Remove once the root cause is confirmed.
-# ------------------------------------------------------------------
-def _supabase_diagnostics() -> dict:
-    import socket
-    from urllib.parse import urlparse
-    import db
-
-    url = db.SUPABASE_URL
-    info = {
-        "supabase_url_repr": repr(url),
-        "service_role_key_present": bool(db.SUPABASE_KEY),
-    }
-    if url:
-        host = urlparse(url).hostname
-        info["parsed_host_repr"] = repr(host)
-        # Also probe the host exactly as-is (raw slice after '://') to catch
-        # whitespace that urlparse may quietly drop from .hostname.
-        raw_after_scheme = url.split("://", 1)[-1].split("/", 1)[0]
-        info["raw_netloc_repr"] = repr(raw_after_scheme)
-        try:
-            info["dns"] = {"host": host, "resolved_ip": socket.gethostbyname(host)}
-        except Exception as exc:
-            info["dns"] = {"host": host, "error": repr(exc)}
-    return info
-
-
-@app.on_event("startup")
-async def _log_supabase_config():
-    try:
-        diag = _supabase_diagnostics()
-        print(f"[startup] supabase diagnostics: {diag}")
-    except Exception as exc:  # never block startup on a diagnostic
-        print(f"[startup] supabase diagnostics failed: {exc!r}")
-
-
-@app.get("/debug/supabase")
-async def debug_supabase():
-    return _supabase_diagnostics()
-
-
-# ------------------------------------------------------------------
 # WebSocket (optional live reasoning stream)
 # ------------------------------------------------------------------
 @app.websocket("/ws/{session_id}")

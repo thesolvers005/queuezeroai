@@ -16,8 +16,12 @@ from distance import haversine_km
 
 load_dotenv()
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+# .strip() guards against trailing whitespace/newlines pasted into the env var
+# (e.g. a copy-pasted Railway value), which would otherwise reach create_client
+# as part of the hostname and fail DNS with "[Errno -2] Name or service not
+# known". "" -> None so the "if not SUPABASE_URL" check below still fires.
+SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip() or None
+SUPABASE_KEY = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip() or None
 
 _client = None
 

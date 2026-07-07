@@ -19,7 +19,9 @@ load_dotenv()
 MODEL = "claude-sonnet-5"  # swap to claude-opus-4-8 for harder reasoning, claude-haiku-4-5-20251001 for speed/cost
 MAX_TOOL_ROUNDS = 8  # safety cap so a confused loop can't run forever
 
-client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+# .strip() guards against trailing whitespace/newlines in a pasted env var;
+# "" -> None so the SDK still raises a clear "missing key" error when unset.
+client = Anthropic(api_key=(os.environ.get("ANTHROPIC_API_KEY") or "").strip() or None)
 
 
 def run_agent(user_message, conversation_history=None, on_step=None, extra_system=None):
