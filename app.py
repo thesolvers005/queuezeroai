@@ -137,9 +137,16 @@ def _mock_run_agent(user_message, conversation_history=None, on_step=None, extra
     return {"reply": reply, "steps": steps, "history": messages}
 
 
+def is_mock_mode() -> bool:
+    """True when the agent is running as the mock stand-in rather than the real
+    provider -- either forced via USE_MOCK_AGENT or because the real provider
+    failed to import. Single source of truth for the mock/live distinction."""
+    return USE_MOCK_AGENT or _real_run_agent is None
+
+
 def run_agent(*args, **kwargs):
     """Dispatch to the real provider unless mock is forced/needed."""
-    if USE_MOCK_AGENT or _real_run_agent is None:
+    if is_mock_mode():
         return _mock_run_agent(*args, **kwargs)
     return _real_run_agent(*args, **kwargs)
 
@@ -216,7 +223,12 @@ def _send_confirmation_email(appointment: Optional[dict], patient_email: Optiona
     recipient and appointment details are passed in per-request (no module-level
     state), so concurrent bookings cannot cross-contaminate each other. Never
     raises: send_confirmation_email reports any failure in its return value.
+
+    Suppressed entirely in mock mode: a mock booking is a canned demo result,
+    not a real reservation, so it must never trigger a real confirmation email.
     """
+    if is_mock_mode():
+        return {"sent": False, "error": "mock mode: confirmation email suppressed"}
     if not appointment:
         return {"sent": False, "error": "no appointment to confirm"}
     to_email = notifications.resolve_recipient(patient_email)
@@ -379,7 +391,7 @@ async def emergency_log():
 async def health():
     return {
         "status": "ok",
-        "mode": "mock" if (USE_MOCK_AGENT or _real_run_agent is None) else "live",
+        "mode": "mock" if is_mock_mode() else "live",
         "sessions_active": len(SESSIONS),
         "patients_known": len(PATIENT_MEMORY),
     }
