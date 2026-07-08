@@ -48,6 +48,10 @@ const WHEN_OPTIONS = [
 ];
 
 export default function QueueZeroApp() {
+  // In-memory only (no localStorage — unavailable in this environment). A demo
+  // "account": name + email are captured at sign-in and used to pre-fill the
+  // booking payload. Not real auth; the password is cosmetic and unverified.
+  const [user, setUser] = useState(null);
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
   const [sessionId, setSessionId] = useState(null);
@@ -140,6 +144,28 @@ export default function QueueZeroApp() {
     inputRef.current?.focus();
   };
 
+  // Sign in / sign up: capture the demo account and pre-fill the booking
+  // identity from it. patientName/patientEmail feed the /book payload exactly
+  // as before — only their source changes (account instead of manual entry).
+  const handleAuth = ({ name, email }) => {
+    setUser({ name, email });
+    setPatientName(name);
+    setPatientEmail(email);
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    setPatientName("");
+    setPatientEmail("");
+    setMessages([]);
+    setIsEmergency(false);
+    setSessionId(`sess_${Date.now()}`);
+  };
+
+  if (!user) {
+    return <AuthScreen onAuth={handleAuth} />;
+  }
+
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant" && m.steps?.length);
   const panelSteps = lastAssistant?.steps || [];
 
@@ -153,7 +179,7 @@ export default function QueueZeroApp() {
       </div>
 
       <div className="relative z-10 flex h-full flex-col">
-        <Header health={health} patientName={patientName} />
+        <Header health={health} user={user} onLogout={handleLogout} />
 
         {isEmergency && (
           <div className="mx-auto mt-3 w-full max-w-6xl px-4">
@@ -223,22 +249,6 @@ export default function QueueZeroApp() {
                 </span>
               </div>
               <div className="flex flex-col gap-2 lg:flex-row lg:items-end">
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    placeholder="Your name (optional)"
-                    value={patientName}
-                    onChange={(e) => setPatientName(e.target.value)}
-                    className="w-full rounded-xl border border-teal-900/10 bg-white/80 px-3.5 py-2.5 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/25 lg:w-40"
-                  />
-                  <input
-                    type="email"
-                    placeholder="Email for confirmation"
-                    value={patientEmail}
-                    onChange={(e) => setPatientEmail(e.target.value)}
-                    className="w-full rounded-xl border border-teal-900/10 bg-white/80 px-3.5 py-2.5 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/25 lg:w-48"
-                  />
-                </div>
                 <div className="flex flex-1 gap-2">
                   <textarea
                     ref={inputRef}
@@ -312,7 +322,7 @@ export default function QueueZeroApp() {
   );
 }
 
-function Header({ health, patientName }) {
+function Header({ health, user, onLogout }) {
   const pill =
     health.status === "up"
       ? {
@@ -323,6 +333,8 @@ function Header({ health, patientName }) {
       : health.status === "down"
         ? { dot: "bg-red-500", text: "Backend offline", cls: "border-red-200/80 bg-red-50/70 text-red-700" }
         : { dot: "bg-amber-400", text: "Connecting…", cls: "border-amber-200/80 bg-amber-50/70 text-amber-700" };
+
+  const displayName = user?.name?.trim();
 
   return (
     <header className="border-b border-white/70 bg-white/60 backdrop-blur-xl">
@@ -338,7 +350,9 @@ function Header({ health, patientName }) {
                 AI
               </span>
             </h1>
-            <p className="text-xs text-slate-500">Skip the queue. Let AI book it.</p>
+            <p className="text-xs text-slate-500">
+              {displayName ? `Welcome, ${displayName}` : "Skip the queue. Let AI book it."}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -348,11 +362,20 @@ function Header({ health, patientName }) {
             <span className={`h-1.5 w-1.5 rounded-full ${pill.dot}`} />
             {pill.text}
           </span>
-          {patientName.trim() && (
-            <span className="flex items-center gap-1.5 rounded-full border border-teal-900/10 bg-white/70 px-3 py-1 text-xs font-medium text-slate-600 backdrop-blur">
+          {displayName && (
+            <span className="hidden items-center gap-1.5 rounded-full border border-teal-900/10 bg-white/70 px-3 py-1 text-xs font-medium text-slate-600 backdrop-blur sm:flex">
               <UserIcon />
-              {patientName.trim()}
+              {displayName}
             </span>
+          )}
+          {user && (
+            <button
+              onClick={onLogout}
+              className="flex items-center gap-1.5 rounded-full border border-teal-900/10 bg-white/70 px-3 py-1 text-xs font-medium text-slate-600 backdrop-blur transition hover:border-teal-400 hover:text-teal-800"
+            >
+              <LogoutIcon />
+              Log out
+            </button>
           )}
         </div>
       </div>
@@ -503,7 +526,152 @@ function TypingIndicator() {
   );
 }
 
+function AuthScreen({ onAuth }) {
+  const [mode, setMode] = useState("signin"); // "signin" | "signup"
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState(""); // cosmetic only — never verified
+  const [error, setError] = useState("");
+
+  const isSignup = mode === "signup";
+
+  const submit = (e) => {
+    e.preventDefault();
+    const n = name.trim();
+    const em = email.trim();
+    if (!n) return setError("Please enter your name.");
+    if (!em || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em))
+      return setError("Please enter a valid email address.");
+    setError("");
+    onAuth({ name: n, email: em });
+  };
+
+  const swap = (next) => {
+    setMode(next);
+    setError("");
+  };
+
+  return (
+    <div className="relative flex h-screen items-center justify-center overflow-hidden bg-[#f2f8f6] px-4 text-slate-800">
+      {/* same teal backdrop blobs as the main app */}
+      <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="absolute -top-32 -left-24 h-96 w-96 rounded-full bg-teal-200/50 blur-3xl" />
+        <div className="absolute top-1/3 -right-28 h-[28rem] w-[28rem] rounded-full bg-emerald-200/45 blur-3xl" />
+        <div className="absolute -bottom-24 left-1/3 h-80 w-80 rounded-full bg-cyan-200/40 blur-3xl" />
+      </div>
+
+      <div className="relative z-10 w-full max-w-sm">
+        <div className="mb-6 flex flex-col items-center text-center">
+          <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-teal-600 to-emerald-600 text-white shadow-lg shadow-teal-600/25">
+            <PulseIcon large />
+          </div>
+          <h1 className="text-2xl font-bold text-slate-800">
+            QueueZero
+            <span className="ml-2 rounded-full bg-teal-100/80 px-2 py-0.5 align-middle text-xs font-semibold text-teal-800">
+              AI
+            </span>
+          </h1>
+          <p className="mt-1 text-sm text-slate-500">Skip the queue. Let AI book it.</p>
+        </div>
+
+        <div className="rounded-2xl border border-white/70 bg-white/55 p-6 shadow-[0_8px_32px_rgba(15,110,86,0.10)] backdrop-blur-xl">
+          {/* Sign in / Sign up toggle */}
+          <div className="mb-5 grid grid-cols-2 gap-1 rounded-xl border border-teal-900/10 bg-white/50 p-1">
+            {[
+              { key: "signin", label: "Sign in" },
+              { key: "signup", label: "Sign up" },
+            ].map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => swap(t.key)}
+                className={`rounded-lg py-2 text-sm font-medium transition ${
+                  mode === t.key
+                    ? "bg-gradient-to-br from-teal-600 to-emerald-600 text-white shadow-sm"
+                    : "text-slate-500 hover:text-teal-700"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <form onSubmit={submit} className="flex flex-col gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-500">Name</span>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Jane Doe"
+                autoFocus
+                className="w-full rounded-xl border border-teal-900/10 bg-white/80 px-3.5 py-2.5 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/25"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-500">Email</span>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="jane@example.com"
+                className="w-full rounded-xl border border-teal-900/10 bg-white/80 px-3.5 py-2.5 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/25"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-500">
+                Password <span className="text-slate-400">(optional)</span>
+              </span>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                className="w-full rounded-xl border border-teal-900/10 bg-white/80 px-3.5 py-2.5 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/25"
+              />
+            </label>
+
+            {error && <p className="text-xs text-red-600">{error}</p>}
+
+            <button
+              type="submit"
+              className="mt-1 flex items-center justify-center rounded-xl bg-gradient-to-br from-teal-600 to-emerald-600 py-2.5 text-sm font-semibold text-white shadow-md shadow-teal-600/25 transition hover:from-teal-500 hover:to-emerald-500 active:scale-[0.99]"
+            >
+              {isSignup ? "Create account" : "Sign in"}
+            </button>
+          </form>
+
+          <p className="mt-4 text-center text-xs text-slate-400">
+            {isSignup ? "Already have an account? " : "New to QueueZero? "}
+            <button
+              type="button"
+              onClick={() => swap(isSignup ? "signin" : "signup")}
+              className="font-medium text-teal-700 hover:text-teal-800"
+            >
+              {isSignup ? "Sign in" : "Create one"}
+            </button>
+          </p>
+        </div>
+
+        <p className="mt-4 text-center text-[11px] text-slate-400">
+          Demo account — no password required. Your details are used only to book and confirm.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /* --- inline icons (stroke inherits currentColor) --- */
+
+function LogoutIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <path d="m16 17 5-5-5-5" />
+      <path d="M21 12H9" />
+    </svg>
+  );
+}
 
 function PulseIcon({ large }) {
   const s = large ? 28 : 20;
