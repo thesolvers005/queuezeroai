@@ -62,7 +62,11 @@ export default function QueueZeroApp() {
   const [health, setHealth] = useState({ status: "checking" });
   const [quickSpec, setQuickSpec] = useState("");
   const [quickWhen, setQuickWhen] = useState("next");
+  const [streamingSteps, setStreamingSteps] = useState([]);
+  const [streamingActive, setStreamingActive] = useState(false);
+  const [liveMode, setLiveMode] = useState(true);
   const messagesEndRef = useRef(null);
+  const timelineEndRef = useRef(null);
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -76,6 +80,10 @@ export default function QueueZeroApp() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  useEffect(() => {
+    timelineEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [streamingSteps]);
 
   const sendMessage = async (text) => {
     const userMessage = (text ?? inputValue).trim();
@@ -126,10 +134,119 @@ export default function QueueZeroApp() {
     }
   };
 
+  // Live streaming path — same payload/session semantics as sendMessage, but
+  // consumes POST /api/chat/stream (SSE) so the reasoning panel can animate
+  // each tool step as it actually happens instead of all at once at the end.
+  // sendMessage above is left fully intact as the non-streaming fallback.
+  const streamBooking = async (text) => {
+    const userMessage = (text ?? inputValue).trim();
+    if (!userMessage || streamingActive || loading) return;
+
+    setInputValue("");
+    setQuickSpec("");
+    setStreamingSteps([]);
+    setStreamingActive(true);
+    setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
+
+    try {
+      const response = await fetch(`${API_URL}/api/chat/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_message: userMessage,
+          patient_name: patientName || undefined,
+          patient_email: patientEmail.trim() || undefined,
+          session_id: sessionId,
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        const body = await response.text().catch(() => "");
+        throw new Error(`${response.status} ${response.statusText} — ${body}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let done = false;
+
+      while (!done) {
+        const { value, done: readerDone } = await reader.read();
+        if (readerDone) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          const payload = line.startsWith("data: ") ? line.slice(6) : line;
+          if (payload === "[DONE]") {
+            done = true;
+            break;
+          }
+
+          let event;
+          try {
+            event = JSON.parse(payload);
+          } catch {
+            continue;
+          }
+
+          if (event.id != null) {
+            setStreamingSteps((prev) => {
+              const i = prev.findIndex((s) => s.id === event.id);
+              if (i === -1) return [...prev, event];
+              const next = prev.slice();
+              next[i] = event;
+              return next;
+            });
+          } else if (event.type === "final") {
+            if (event.session_id) setSessionId(event.session_id);
+            if (event.is_emergency) setIsEmergency(true);
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                content: event.reply,
+                steps: event.steps || [],
+                appointment: event.appointment || null,
+              },
+            ]);
+          } else if (event.type === "error") {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", isError: true, content: `Request failed: ${event.message}` },
+            ]);
+          }
+        }
+      }
+    } catch (error) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", isError: true, content: `Request failed: ${error.message}` },
+      ]);
+    } finally {
+      setStreamingActive(false);
+    }
+  };
+
+  const submit = (t) => {
+    if (liveMode) {
+      streamBooking(t);
+    } else {
+      // Clear any leftover live timeline so the static panel (driven by
+      // panelSteps from the latest assistant message) takes over again.
+      setStreamingSteps([]);
+      sendMessage(t);
+    }
+  };
+
   const onKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      submit();
     }
   };
 
@@ -201,7 +318,7 @@ export default function QueueZeroApp() {
           <section className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-white/70 bg-white/55 shadow-[0_8px_32px_rgba(15,110,86,0.10)] backdrop-blur-xl">
             <div className="flex-1 space-y-4 overflow-y-auto p-5">
               {messages.length === 0 ? (
-                <EmptyState onPick={(t) => sendMessage(t)} />
+                <EmptyState onPick={(t) => submit(t)} />
               ) : (
                 <>
                   {messages.map((msg, idx) => (
@@ -260,8 +377,8 @@ export default function QueueZeroApp() {
                     className="max-h-32 min-h-[42px] flex-1 resize-none rounded-xl border border-teal-900/10 bg-white/80 px-4 py-2.5 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/25"
                   />
                   <button
-                    onClick={() => sendMessage()}
-                    disabled={loading || !inputValue.trim()}
+                    onClick={() => submit()}
+                    disabled={loading || streamingActive || !inputValue.trim()}
                     aria-label="Send message"
                     className="flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-teal-600 to-emerald-600 text-white shadow-md shadow-teal-600/25 transition hover:from-teal-500 hover:to-emerald-500 active:scale-95 disabled:from-slate-300 disabled:to-slate-300 disabled:shadow-none"
                   >
@@ -269,9 +386,30 @@ export default function QueueZeroApp() {
                   </button>
                 </div>
               </div>
-              <p className="mt-2 text-xs text-slate-400">
-                Enter to send · Shift+Enter for a new line
-              </p>
+              <div className="mt-2 flex items-center justify-between">
+                <p className="text-xs text-slate-400">
+                  Enter to send · Shift+Enter for a new line
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setLiveMode((v) => !v)}
+                  aria-pressed={liveMode}
+                  className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
+                    liveMode
+                      ? "border-teal-500/50 bg-teal-100/80 text-teal-800"
+                      : "border-teal-900/10 bg-white/50 text-slate-400 hover:border-teal-400 hover:text-teal-700"
+                  }`}
+                >
+                  <span
+                    className={`flex h-3.5 w-6 items-center rounded-full transition ${
+                      liveMode ? "justify-end bg-teal-600" : "justify-start bg-slate-300"
+                    }`}
+                  >
+                    <span className="h-2.5 w-2.5 rounded-full bg-white shadow-sm" />
+                  </span>
+                  Live reasoning
+                </button>
+              </div>
             </div>
           </section>
 
@@ -282,15 +420,21 @@ export default function QueueZeroApp() {
               <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                 Agent reasoning
               </h2>
-              {loading && (
+              {(loading || streamingActive) && (
                 <span className="ml-auto flex items-center gap-1.5 text-xs text-teal-700">
                   <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-teal-600" />
-                  working
+                  {streamingActive ? "streaming…" : "working"}
                 </span>
               )}
             </div>
             <div className="flex-1 overflow-y-auto p-4">
-              {panelSteps.length === 0 && !loading ? (
+              {streamingActive || streamingSteps.length > 0 ? (
+                <LiveTimelinePanel
+                  steps={streamingSteps}
+                  active={streamingActive}
+                  endRef={timelineEndRef}
+                />
+              ) : panelSteps.length === 0 && !loading ? (
                 <p className="text-sm leading-relaxed text-slate-400">
                   Each step the agent takes — locating you, comparing doctors, booking the slot —
                   will appear here live.
@@ -482,6 +626,72 @@ function StepItem({ step, isLast }) {
           <p className="mt-0.5 break-all font-mono text-[11px] text-slate-400/90">{inputPreview}</p>
         )}
         {hasError && <p className="mt-1 text-xs text-red-600">Error: {String(step.output.error)}</p>}
+      </div>
+    </li>
+  );
+}
+
+function LiveTimelinePanel({ steps, active, endRef }) {
+  if (steps.length === 0) {
+    return (
+      <p className="text-sm leading-relaxed text-slate-400">
+        Each step the agent takes — locating you, comparing doctors, booking the slot — will
+        appear here live.
+      </p>
+    );
+  }
+
+  return (
+    <ol className="flex flex-col">
+      {steps.map((step, i) => (
+        <LiveStepItem key={step.id} step={step} isLast={i === steps.length - 1 && !active} />
+      ))}
+      {active && (
+        <li className="flex gap-3">
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-teal-300 bg-white/80">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-teal-500" />
+          </span>
+          <p className="pt-0.5 text-sm text-slate-500">Thinking…</p>
+        </li>
+      )}
+      <div ref={endRef} />
+    </ol>
+  );
+}
+
+function LiveStepItem({ step, isLast }) {
+  const isError = step.status === "error";
+  const isPending = step.status === "pending";
+
+  return (
+    <li className="flex gap-3 animate-[fadeIn_150ms_ease-out]">
+      <div className="flex flex-col items-center">
+        <span
+          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full transition-transform duration-150 ${
+            isError
+              ? "bg-red-100 text-red-600"
+              : isPending
+                ? "border border-teal-300 bg-white/80"
+                : "scale-110 bg-gradient-to-br from-teal-600 to-emerald-600 text-white"
+          }`}
+        >
+          {isError ? (
+            <XSmallIcon />
+          ) : isPending ? (
+            <span className="h-2 w-2 animate-pulse rounded-full bg-teal-500" />
+          ) : (
+            <CheckSmallIcon />
+          )}
+        </span>
+        {!isLast && <span className="w-px flex-1 bg-teal-900/10" />}
+      </div>
+      <div className={isLast ? "" : "pb-4"}>
+        <p className="text-sm font-medium leading-5 text-slate-700">{step.step}</p>
+        {step.details && (
+          <p className="mt-0.5 break-all font-mono text-[11px] text-slate-400/90">
+            {step.details}
+          </p>
+        )}
       </div>
     </li>
   );

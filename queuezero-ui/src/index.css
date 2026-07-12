@@ -31,3 +31,12 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(15, 110, 86, 0.32);
 }
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
