@@ -6,6 +6,8 @@ Claude decides which of these to call and in what order — this file just
 describes the tools and wires calls through to the real data layer.
 """
 
+import threading
+
 import db
 import locations
 
@@ -268,11 +270,96 @@ def _sanitize_output(name, output):
     return output
 
 
+
+# ------------------------------------------------------------------
+# Optional live-streaming hook for execute_tool (used by the SSE endpoint).
+#
+# execute_tool is the one place every provider's tool-calling loop already
+# funnels through, so it's the single clean spot to observe real dispatch
+# timing -- rather than threading an `emit` param through each provider's
+# run_agent loop (claude_provider.py's loop is off-limits for this change),
+# a per-thread hook here gives the same truthful pending/complete timing
+# with zero changes to any provider file. Set via set_emit_hook() from the
+# SAME worker thread that then calls run_agent(), so threading.local keeps
+# concurrent requests (different threads) fully isolated; the non-streaming
+# callers never call set_emit_hook, so _local.emit stays None and
+# execute_tool behaves exactly as before.
+# ------------------------------------------------------------------
+_local = threading.local()
+
+STEP_LABELS = {
+    "resolve_location": ("📍 Resolving location", "📍 Location resolved"),
+    "search_hospitals": ("🏥 Searching hospitals", "🏥 {n} hospitals found"),
+    "find_doctors": ("🏥 Searching nearby doctors", "🏥 {n} doctors found"),
+    "find_available_slots": ("⏰ Checking availability", "⏰ {n} slots found"),
+    "book_slot": ("📋 Booking appointment", "✓ Appointment booked"),
+    "emergency_book": ("🚨 Booking emergency appointment", "✓ Emergency appointment booked"),
+    "find_patient_by_name": ("🔍 Looking up patient", "🔍 Patient lookup complete"),
+    "send_notification": ("📧 Sending confirmation", "✓ Confirmation sent"),
+}
+
+
+def set_emit_hook(emit):
+    """Install a per-thread callback that execute_tool fires around each real
+    dispatch. Call this from the worker thread right before run_agent(), and
+    clear_emit_hook() in a finally block once it returns."""
+    _local.emit = emit
+    _local.counter = 0
+
+
+def clear_emit_hook():
+    _local.emit = None
+
+
+def _step_details(name, output):
+    """Truthful, human-readable detail string pulled from the real tool output."""
+    if name in ("find_doctors", "search_hospitals", "find_available_slots"):
+        return f"{len(output)} found" if isinstance(output, list) else ""
+    if name in ("book_slot", "emergency_book") and isinstance(output, dict):
+        return f"{output.get('doctor_name')} — {output.get('appointment_date')} {output.get('appointment_time')}"
+    if name == "resolve_location":
+        if isinstance(output, dict):
+            return f"{output.get('latitude')}, {output.get('longitude')}"
+        return "location not recognized"
+    if name == "find_patient_by_name":
+        return output.get("name") if isinstance(output, dict) else "no matching patient"
+    if name == "send_notification":
+        return "delivered" if isinstance(output, dict) and output.get("success") else ""
+    return ""
+
+
 def execute_tool(name, tool_input):
+    emit = getattr(_local, "emit", None)
+    step_id = None
+    pending_label = name
+
+    if emit is not None:
+        pending_label, _ = STEP_LABELS.get(name, (name, name))
+        _local.counter += 1
+        step_id = _local.counter
+        emit({"id": step_id, "step": pending_label, "status": "pending", "details": ""})
+
     if name not in _DISPATCH:
-        return {"error": f"Unknown tool: {name}"}
-    try:
-        raw_output = _DISPATCH[name](**tool_input)
-        return _sanitize_output(name, raw_output)
-    except Exception as exc:
-        return {"error": str(exc)}
+        output = {"error": f"Unknown tool: {name}"}
+    else:
+        try:
+            raw_output = _DISPATCH[name](**tool_input)
+            output = _sanitize_output(name, raw_output)
+        except Exception as exc:
+            output = {"error": str(exc)}
+
+    if emit is not None:
+        _, complete_label = STEP_LABELS.get(name, (name, name))
+        is_error = (
+            (isinstance(output, dict) and "error" in output)
+            or (name == "resolve_location" and output is None)
+        )
+        if is_error:
+            message = output.get("error") if isinstance(output, dict) else "location not recognized"
+            emit({"id": step_id, "step": pending_label, "status": "error", "details": message})
+        else:
+            details = _step_details(name, output)
+            label = complete_label.format(n=len(output)) if "{n}" in complete_label else complete_label
+            emit({"id": step_id, "step": label, "status": "complete", "details": details})
+
+    return output

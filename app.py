@@ -18,16 +18,20 @@ Agent wiring:
   and leave USE_MOCK_AGENT unset (or "false").
 """
 
+import asyncio
+import json
 import os
 from datetime import datetime
 from typing import Optional, List
 
 from fastapi import FastAPI, WebSocket, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
 import notifications
+import tools
 from memory import PatientMemory, ConversationHistory
 from emergency import (
     should_trigger_emergency,
@@ -309,6 +313,96 @@ async def book_appointment(req: BookRequest):
         steps=result.get("steps", []),
         appointment=appointment,
         is_emergency=is_emergency,
+    )
+
+
+# ------------------------------------------------------------------
+# Streaming booking endpoint (SSE) -- reasoning-timeline foundation
+# ------------------------------------------------------------------
+def _run_agent_with_tool_events(emit, user_message, conversation_history, extra_system):
+    """Runs on the executor thread: installs the per-thread emit hook that
+    tools.execute_tool reads (see tools.py), so real tool-dispatch timing is
+    observed without any change to claude_provider.py's tool-calling loop."""
+    tools.set_emit_hook(emit)
+    try:
+        return run_agent(
+            user_message,
+            conversation_history=conversation_history,
+            extra_system=extra_system,
+        )
+    finally:
+        tools.clear_emit_hook()
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(req: BookRequest):
+    """Streams each real agent reasoning/tool step as it happens (Server-Sent
+    Events), for an animated reasoning timeline in the frontend. Purely
+    additive -- POST /book is untouched and keeps working exactly as before.
+
+    Frontend note: this is a POST endpoint, so the browser's native
+    EventSource (GET-only) will NOT work against it. Consume it with
+    fetch() + response.body.getReader() (ReadableStream) + TextDecoder
+    instead.
+    """
+    history = _get_session(req.session_id, prefix="sess")
+    session_id = history.session_id
+
+    is_emergency = should_trigger_emergency(req.user_message)
+    extra_system = _build_extra_system(req.patient_name, is_emergency)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def emit(event: dict):  # called from the worker thread
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    async def run_agent_task():
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: _run_agent_with_tool_events(
+                    emit, req.user_message, history.get_messages(), extra_system
+                ),
+            )
+            history.set_messages(result.get("history", []))
+            appointment = extract_appointment_from_steps(result.get("steps", []))
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
+                {
+                    "type": "final",
+                    "session_id": session_id,
+                    "reply": result.get("reply", ""),
+                    "steps": result.get("steps", []),
+                    "appointment": appointment,
+                    "is_emergency": is_emergency,
+                },
+            )
+        except Exception as e:
+            loop.call_soon_threadsafe(
+                queue.put_nowait, {"type": "error", "message": str(e)}
+            )
+        finally:
+            # ALWAYS terminate the stream, even on failure
+            loop.call_soon_threadsafe(queue.put_nowait, {"type": "done"})
+
+    async def gen():
+        # id 0 marks the start of the loop itself, not a tool call -- emitted
+        # directly here (already on the loop) rather than via tools.py.
+        yield f"data: {json.dumps({'id': 0, 'step': '🧠 Understanding request', 'status': 'complete', 'details': ''})}\n\n"
+        task = asyncio.create_task(run_agent_task())
+        while True:
+            event = await queue.get()
+            if event.get("type") == "done":
+                yield "data: [DONE]\n\n"
+                break
+            yield f"data: {json.dumps(event)}\n\n"
+        await task
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
