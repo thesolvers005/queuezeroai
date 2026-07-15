@@ -21,15 +21,19 @@ Agent wiring:
 import asyncio
 import json
 import os
-from datetime import datetime
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 
-from fastapi import FastAPI, WebSocket, HTTPException
+import bcrypt
+import jwt
+from fastapi import FastAPI, WebSocket, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
+import db
 import notifications
 import tools
 from memory import PatientMemory, ConversationHistory
@@ -52,6 +56,58 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ------------------------------------------------------------------
+# Auth config (signup / login / JWT sessions)
+# ------------------------------------------------------------------
+JWT_SECRET = os.environ.get("JWT_SECRET", "").strip()
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_DAYS = 30
+
+if not JWT_SECRET:
+    # Fixed dev fallback (never a randomly-generated secret) so tokens survive
+    # a restart/redeploy instead of being invalidated every time. This must
+    # never be what's used in production -- set JWT_SECRET in the real env.
+    JWT_SECRET = "dev-only-insecure-queuezero-jwt-secret-do-not-use-in-production"
+    print(
+        "[startup] WARNING: JWT_SECRET is not set. Falling back to a hardcoded "
+        "DEV-ONLY secret -- all issued tokens are forgeable. Set JWT_SECRET in "
+        "the environment before deploying."
+    )
+
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
+def hash_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def make_token(user_id: str, email: str) -> str:
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "exp": datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRY_DAYS),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_token(token: str) -> Optional[dict]:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        return None
+
 
 # ------------------------------------------------------------------
 # Agent wiring (real provider with graceful mock fallback)
@@ -194,6 +250,17 @@ class EmergencyBookRequest(BaseModel):
     reason: str  # "chest pain", "allergic reaction", etc.
     patient_email: Optional[str] = None  # falls back to PATIENT_EMAIL env var
     session_id: Optional[str] = None
+
+
+class SignupRequest(BaseModel):
+    email: str
+    name: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
 
 # ------------------------------------------------------------------
@@ -476,6 +543,90 @@ async def get_patient_memory(patient_name: str):
 @app.get("/emergency/log")
 async def emergency_log():
     return {"count": len(get_emergency_log()), "entries": get_emergency_log()}
+
+
+# ------------------------------------------------------------------
+# Auth (signup / login / verify) -- identity only, does not gate booking
+# ------------------------------------------------------------------
+@app.post("/auth/signup", status_code=201)
+async def auth_signup(req: SignupRequest):
+    email = normalize_email(req.email)
+    name = (req.name or "").strip()
+    password = req.password or ""
+
+    if not EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="Please enter a valid email address.")
+    if not name:
+        raise HTTPException(status_code=400, detail="Please enter your name.")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+
+    client = db.get_client()
+    existing = client.table("users").select("id").eq("email", email).limit(1).execute()
+    if existing.data:
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    inserted = (
+        client.table("users")
+        .insert({"email": email, "password_hash": hash_password(password), "name": name})
+        .execute()
+    )
+    if not inserted.data:
+        raise HTTPException(status_code=500, detail="Could not create account. Please try again.")
+
+    user_row = inserted.data[0]
+    token = make_token(user_row["id"], user_row["email"])
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {"id": user_row["id"], "email": user_row["email"], "name": user_row["name"]},
+    }
+
+
+@app.post("/auth/login")
+async def auth_login(req: LoginRequest):
+    email = normalize_email(req.email)
+    password = req.password or ""
+
+    client = db.get_client()
+    result = client.table("users").select("*").eq("email", email).limit(1).execute()
+    user_row = result.data[0] if result.data else None
+
+    # Same message whether the email is unknown or the password is wrong, so a
+    # caller can't use this endpoint to enumerate registered emails.
+    if not user_row or not verify_password(password, user_row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    token = make_token(user_row["id"], user_row["email"])
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {"id": user_row["id"], "email": user_row["email"], "name": user_row["name"]},
+    }
+
+
+@app.post("/auth/verify")
+async def auth_verify(authorization: Optional[str] = Header(None)):
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[len("Bearer "):].strip()
+
+    payload = decode_token(token) if token else None
+    if not payload:
+        return JSONResponse(status_code=401, content={"valid": False})
+
+    client = db.get_client()
+    result = (
+        client.table("users").select("id, email, name").eq("id", payload.get("sub")).limit(1).execute()
+    )
+    if not result.data:
+        return JSONResponse(status_code=401, content={"valid": False})
+
+    user_row = result.data[0]
+    return {
+        "valid": True,
+        "user": {"id": user_row["id"], "email": user_row["email"], "name": user_row["name"]},
+    }
 
 
 # ------------------------------------------------------------------

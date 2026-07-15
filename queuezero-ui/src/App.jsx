@@ -10,6 +10,7 @@ import React, { useState, useRef, useEffect } from "react";
  */
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const TOKEN_KEY = "queuezero_token";
 
 const STEP_LABELS = {
   resolve_location: "Located the area",
@@ -48,10 +49,12 @@ const WHEN_OPTIONS = [
 ];
 
 export default function QueueZeroApp() {
-  // In-memory only (no localStorage — unavailable in this environment). A demo
-  // "account": name + email are captured at sign-in and used to pre-fill the
-  // booking payload. Not real auth; the password is cosmetic and unverified.
+  // Real auth: the JWT issued by /auth/login or /auth/signup is persisted in
+  // localStorage under TOKEN_KEY so the session survives a refresh. name/email
+  // come from the verified user record and are used to pre-fill the booking
+  // payload exactly as before.
   const [user, setUser] = useState(null);
+  const [authChecking, setAuthChecking] = useState(true);
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
   const [sessionId, setSessionId] = useState(null);
@@ -75,6 +78,31 @@ export default function QueueZeroApp() {
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then((d) => setHealth({ status: "up", mode: d.mode }))
       .catch(() => setHealth({ status: "down" }));
+  }, []);
+
+  // Restore a persisted session on load by verifying the stored token with the
+  // backend, so a refresh doesn't bounce a logged-in user back to AuthScreen.
+  useEffect(() => {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) {
+      setAuthChecking(false);
+      return;
+    }
+    fetch(`${API_URL}/auth/verify`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((data) => {
+        if (!data.valid) throw new Error("invalid token");
+        setUser(data.user);
+        setPatientName(data.user.name || "");
+        setPatientEmail(data.user.email || "");
+      })
+      .catch(() => {
+        localStorage.removeItem(TOKEN_KEY);
+      })
+      .finally(() => setAuthChecking(false));
   }, []);
 
   useEffect(() => {
@@ -261,16 +289,17 @@ export default function QueueZeroApp() {
     inputRef.current?.focus();
   };
 
-  // Sign in / sign up: capture the demo account and pre-fill the booking
-  // identity from it. patientName/patientEmail feed the /book payload exactly
-  // as before — only their source changes (account instead of manual entry).
-  const handleAuth = ({ name, email }) => {
-    setUser({ name, email });
-    setPatientName(name);
-    setPatientEmail(email);
+  // Called by AuthScreen after a real /auth/signup or /auth/login succeeds.
+  // patientName/patientEmail feed the /book payload exactly as before — only
+  // their source changes (verified account instead of manual entry).
+  const handleAuth = (userRecord) => {
+    setUser(userRecord);
+    setPatientName(userRecord.name || "");
+    setPatientEmail(userRecord.email || "");
   };
 
   const handleLogout = () => {
+    localStorage.removeItem(TOKEN_KEY);
     setUser(null);
     setPatientName("");
     setPatientEmail("");
@@ -278,6 +307,14 @@ export default function QueueZeroApp() {
     setIsEmergency(false);
     setSessionId(`sess_${Date.now()}`);
   };
+
+  if (authChecking) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[#f2f8f6]">
+        <span className="h-8 w-8 animate-spin rounded-full border-2 border-teal-600 border-t-transparent" />
+      </div>
+    );
+  }
 
   if (!user) {
     return <AuthScreen onAuth={handleAuth} />;
@@ -740,20 +777,47 @@ function AuthScreen({ onAuth }) {
   const [mode, setMode] = useState("signin"); // "signin" | "signup"
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState(""); // cosmetic only — never verified
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   const isSignup = mode === "signup";
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
+    if (submitting) return; // guards against a double-click firing two requests
+
     const n = name.trim();
     const em = email.trim();
-    if (!n) return setError("Please enter your name.");
+    if (isSignup && !n) return setError("Please enter your name.");
     if (!em || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em))
       return setError("Please enter a valid email address.");
+    if (password.length < 6) return setError("Password must be at least 6 characters.");
+
     setError("");
-    onAuth({ name: n, email: em });
+    setSubmitting(true);
+    try {
+      const path = isSignup ? "/auth/signup" : "/auth/login";
+      const body = isSignup ? { email: em, name: n, password } : { email: em, password };
+      const response = await fetch(`${API_URL}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        setError(data.detail || "Something went wrong. Please try again.");
+        return;
+      }
+
+      localStorage.setItem(TOKEN_KEY, data.access_token);
+      onAuth(data.user);
+    } catch {
+      setError("Could not reach the server. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const swap = (next) => {
@@ -829,9 +893,7 @@ function AuthScreen({ onAuth }) {
               />
             </label>
             <label className="flex flex-col gap-1">
-              <span className="text-xs font-medium text-slate-500">
-                Password <span className="text-slate-400">(optional)</span>
-              </span>
+              <span className="text-xs font-medium text-slate-500">Password</span>
               <input
                 type="password"
                 value={password}
@@ -845,8 +907,12 @@ function AuthScreen({ onAuth }) {
 
             <button
               type="submit"
-              className="mt-1 flex items-center justify-center rounded-xl bg-gradient-to-br from-teal-600 to-emerald-600 py-2.5 text-sm font-semibold text-white shadow-md shadow-teal-600/25 transition hover:from-teal-500 hover:to-emerald-500 active:scale-[0.99]"
+              disabled={submitting}
+              className="mt-1 flex items-center justify-center gap-2 rounded-xl bg-gradient-to-br from-teal-600 to-emerald-600 py-2.5 text-sm font-semibold text-white shadow-md shadow-teal-600/25 transition hover:from-teal-500 hover:to-emerald-500 active:scale-[0.99] disabled:cursor-default disabled:opacity-60"
             >
+              {submitting && (
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/60 border-t-transparent" />
+              )}
               {isSignup ? "Create account" : "Sign in"}
             </button>
           </form>
@@ -864,7 +930,7 @@ function AuthScreen({ onAuth }) {
         </div>
 
         <p className="mt-4 text-center text-[11px] text-slate-400">
-          Demo account — no password required. Your details are used only to book and confirm.
+          Your details are used only to book and confirm appointments.
         </p>
       </div>
     </div>
