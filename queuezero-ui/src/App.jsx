@@ -91,6 +91,9 @@ export default function QueueZeroApp() {
   const messagesEndRef = useRef(null);
   const timelineEndRef = useRef(null);
   const inputRef = useRef(null);
+  // Tracks whether send_notification completed during the current stream,
+  // so the appointment card can show "Confirmation email sent" reliably.
+  const emailSentRef = useRef(false);
 
   useEffect(() => {
     setSessionId(`sess_${Date.now()}`);
@@ -258,6 +261,7 @@ export default function QueueZeroApp() {
     setInputValue("");
     setQuickSpec("");
     setStreamingSteps([]);
+    emailSentRef.current = false;
     setStreamingActive(true);
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
 
@@ -323,6 +327,9 @@ export default function QueueZeroApp() {
                 _t0: existing._t0,
                 _ms: existing._t0 ? now - existing._t0 : null,
               };
+              if (event.status === "complete" && event.step?.includes("Confirmation sent")) {
+                emailSentRef.current = true;
+              }
               return next;
             });
           } else if (event.type === "final") {
@@ -335,6 +342,7 @@ export default function QueueZeroApp() {
                 content: event.reply,
                 steps: event.steps || [],
                 appointment: event.appointment || null,
+                emailSent: emailSentRef.current,
               },
             ]);
           } else if (event.type === "error") {
@@ -899,41 +907,65 @@ function MessageRow({ msg }) {
           <p className="whitespace-pre-wrap">{msg.content}</p>
         </div>
       </div>
-      {msg.appointment && <AppointmentCard appt={msg.appointment} />}
+      {msg.appointment && <AppointmentCard appt={msg.appointment} emailSent={msg.emailSent} />}
     </div>
   );
 }
 
-function AppointmentCard({ appt }) {
+function AppointmentCard({ appt, emailSent }) {
   return (
-    <div className="max-w-[88%] rounded-xl border border-emerald-300/70 bg-emerald-50/80 p-4 backdrop-blur">
-      <div className="mb-2 flex items-center gap-2 text-emerald-800">
-        <CheckBadgeIcon />
-        <h3 className="text-sm font-semibold">Appointment confirmed</h3>
+    <div className="my-1 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      {/* Header bar */}
+      <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/80 px-4 py-2.5">
+        <div className="flex items-center gap-2">
+          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-600 text-white">
+            <CheckSmallIcon />
+          </span>
+          <p className="text-xs font-semibold uppercase tracking-wide text-emerald-800">
+            Appointment confirmed
+          </p>
+        </div>
         {appt.is_emergency && (
-          <span className="ml-auto rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700">
+          <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700">
             Emergency priority
           </span>
         )}
       </div>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">
-        <Field label="Doctor" value={appt.doctor_name} />
-        <Field label="Hospital" value={appt.hospital_name} />
-        <Field label="Date" value={appt.appointment_date} />
-        <Field label="Time" value={appt.appointment_time} />
+
+      {/* Details grid */}
+      <div className="grid grid-cols-2 gap-3 p-4">
+        <ArtifactField label="Doctor"   value={appt.doctor_name} />
+        <ArtifactField label="Hospital" value={appt.hospital_name} />
+        <ArtifactField label="Date"     value={appt.appointment_date} />
+        <ArtifactField label="Time"     value={appt.appointment_time} />
         {appt.estimated_wait_mins != null && (
-          <Field label="Est. wait" value={`${appt.estimated_wait_mins} min`} />
+          <ArtifactField label="Est. wait" value={`${appt.estimated_wait_mins} min`} />
+        )}
+        <ArtifactField label="Status" value="Booked" accent />
+      </div>
+
+      {/* Footer — email delivery status */}
+      <div className="flex items-center border-t border-slate-100 px-4 py-2">
+        {emailSent ? (
+          <span className="flex items-center gap-1.5 text-[11px] text-emerald-700">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            Confirmation email sent
+          </span>
+        ) : (
+          <span className="text-[11px] text-slate-400">Email pending</span>
         )}
       </div>
     </div>
   );
 }
 
-function Field({ label, value }) {
+function ArtifactField({ label, value, accent }) {
   return (
     <div>
-      <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700/80">{label}</p>
-      <p className="text-emerald-950">{value ?? "—"}</p>
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{label}</p>
+      <p className={`mt-0.5 text-sm font-medium ${accent ? "text-emerald-700" : "text-slate-800"}`}>
+        {value ?? "—"}
+      </p>
     </div>
   );
 }
