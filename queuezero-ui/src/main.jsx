@@ -3,11 +3,19 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
 import Admin from './Admin.jsx'
+import Login from './Login.jsx'
+import Landing from './Landing.jsx'
 
-const isAdmin = window.location.pathname.startsWith('/admin')
+const path = window.location.pathname
+
+const Page =
+  path.startsWith('/admin') ? Admin   :
+  path.startsWith('/login') ? Login   :
+  path.startsWith('/app')   ? App     :
+                              Landing
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
-    {isAdmin ? <Admin /> : <App />}
+    <Page />
   </StrictMode>,
 )
