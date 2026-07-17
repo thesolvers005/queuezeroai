@@ -792,7 +792,7 @@ function AuthScreen({ onAuth }) {
     if (isSignup && !n) return setError("Please enter your name.");
     if (!em || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em))
       return setError("Please enter a valid email address.");
-    if (password.length < 6) return setError("Password must be at least 6 characters.");
+    if (password.length < 8) return setError("Password must be at least 8 characters.");
 
     setError("");
     setSubmitting(true);

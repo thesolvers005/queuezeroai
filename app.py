@@ -263,6 +263,18 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class UserOut(BaseModel):
+    id: str
+    email: str
+    name: str
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
+
+
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
@@ -548,7 +560,7 @@ async def emergency_log():
 # ------------------------------------------------------------------
 # Auth (signup / login / verify) -- identity only, does not gate booking
 # ------------------------------------------------------------------
-@app.post("/auth/signup", status_code=201)
+@app.post("/auth/signup", status_code=201, response_model=AuthResponse)
 async def auth_signup(req: SignupRequest):
     email = normalize_email(req.email)
     name = (req.name or "").strip()
@@ -558,8 +570,8 @@ async def auth_signup(req: SignupRequest):
         raise HTTPException(status_code=400, detail="Please enter a valid email address.")
     if not name:
         raise HTTPException(status_code=400, detail="Please enter your name.")
-    if len(password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
 
     client = db.get_client()
     existing = client.table("users").select("id").eq("email", email).limit(1).execute()
@@ -583,13 +595,13 @@ async def auth_signup(req: SignupRequest):
     }
 
 
-@app.post("/auth/login")
+@app.post("/auth/login", response_model=AuthResponse)
 async def auth_login(req: LoginRequest):
     email = normalize_email(req.email)
     password = req.password or ""
 
     client = db.get_client()
-    result = client.table("users").select("*").eq("email", email).limit(1).execute()
+    result = client.table("users").select("id, email, name, password_hash").eq("email", email).limit(1).execute()
     user_row = result.data[0] if result.data else None
 
     # Same message whether the email is unknown or the password is wrong, so a
