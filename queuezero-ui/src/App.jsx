@@ -76,6 +76,7 @@ export default function QueueZeroApp() {
   const [streamingSteps, setStreamingSteps] = useState([]);
   const [streamingActive, setStreamingActive] = useState(false);
   const [liveMode, setLiveMode] = useState(true);
+  const [showTimeline, setShowTimeline] = useState(false);
 
   // Bookings panel state
   const [showBookings, setShowBookings] = useState(false);
@@ -539,8 +540,8 @@ export default function QueueZeroApp() {
             </div>
           </section>
 
-          {/* Reasoning panel */}
-          <aside className="flex min-h-0 max-h-64 flex-col overflow-hidden rounded-2xl border border-white/70 bg-white/45 shadow-[0_8px_32px_rgba(15,110,86,0.08)] backdrop-blur-xl lg:max-h-none">
+          {/* Reasoning panel — desktop only; mobile uses the drawer below */}
+          <aside className="hidden min-h-0 flex-col overflow-hidden rounded-2xl border border-white/70 bg-white/45 shadow-[0_8px_32px_rgba(15,110,86,0.08)] backdrop-blur-xl lg:flex">
             <div className="flex items-center gap-2 border-b border-white/70 px-4 py-3">
               <BrainIcon />
               <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -590,6 +591,56 @@ export default function QueueZeroApp() {
           </aside>
         </main>
       </div>
+
+      {/* Mobile timeline — floating toggle pill, visible whenever there are steps */}
+      {(streamingActive || streamingSteps.length > 0) && (
+        <div className="fixed bottom-[76px] right-4 z-30 lg:hidden">
+          <button
+            onClick={() => setShowTimeline((v) => !v)}
+            className="flex items-center gap-1.5 rounded-full border border-teal-200 bg-white/95 px-3 py-2 text-xs font-medium text-teal-800 shadow-lg backdrop-blur"
+          >
+            <BrainIcon />
+            {showTimeline
+              ? "Hide steps"
+              : `${streamingSteps.length} step${streamingSteps.length !== 1 ? "s" : ""}`}
+          </button>
+        </div>
+      )}
+
+      {/* Mobile timeline drawer */}
+      {showTimeline && (
+        <div className="fixed inset-x-0 bottom-0 z-30 lg:hidden">
+          <div
+            className="absolute inset-0 bg-slate-900/10 backdrop-blur-sm"
+            onClick={() => setShowTimeline(false)}
+          />
+          <div className="relative max-h-72 overflow-y-auto rounded-t-2xl border-t border-white/70 bg-white/95 p-4 shadow-2xl backdrop-blur-xl">
+            <div className="mb-3 flex items-center gap-2">
+              <BrainIcon />
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Agent reasoning
+              </p>
+              {streamingActive && streamingSteps.length > 0 && (
+                <span className="flex items-center gap-1 text-[11px] font-medium text-teal-700">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-teal-600" />
+                  Step {streamingSteps[streamingSteps.length - 1].id} of {MAX_STEPS}
+                </span>
+              )}
+              <button
+                onClick={() => setShowTimeline(false)}
+                className="ml-auto text-slate-400 hover:text-slate-600"
+              >
+                <XIcon />
+              </button>
+            </div>
+            <LiveTimelinePanel
+              steps={streamingSteps}
+              active={streamingActive}
+              endRef={timelineEndRef}
+            />
+          </div>
+        </div>
+      )}
 
       {/* My Bookings slide-over */}
       {showBookings && (
