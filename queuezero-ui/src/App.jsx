@@ -12,6 +12,9 @@ import React, { useState, useRef, useEffect } from "react";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const TOKEN_KEY = "queuezero_token";
 
+// Matches MAX_TOOL_ROUNDS in claude_provider.py / openrouter_provider.py / ollama_provider.py
+const MAX_STEPS = 8;
+
 const CANCEL_REASONS = [
   { value: "schedule_conflict", label: "Schedule conflict" },
   { value: "found_another_doctor", label: "Found another doctor" },
@@ -310,10 +313,16 @@ export default function QueueZeroApp() {
 
           if (event.id != null) {
             setStreamingSteps((prev) => {
-              const i = prev.findIndex((s) => s.id === event.id);
-              if (i === -1) return [...prev, event];
+              const now = Date.now();
+              const i   = prev.findIndex((s) => s.id === event.id);
+              if (i === -1) return [...prev, { ...event, _t0: now }];
+              const existing = prev[i];
               const next = prev.slice();
-              next[i] = event;
+              next[i] = {
+                ...event,
+                _t0: existing._t0,
+                _ms: existing._t0 ? now - existing._t0 : null,
+              };
               return next;
             });
           } else if (event.type === "final") {
@@ -530,9 +539,11 @@ export default function QueueZeroApp() {
                 Agent reasoning
               </h2>
               {(loading || streamingActive) && (
-                <span className="ml-auto flex items-center gap-1.5 text-xs text-teal-700">
+                <span className="ml-auto flex items-center gap-1.5 text-[11px] font-medium text-teal-700">
                   <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-teal-600" />
-                  {streamingActive ? "streaming…" : "working"}
+                  {streamingActive && streamingSteps.length > 0
+                    ? `Step ${streamingSteps[streamingSteps.length - 1].id} of ${MAX_STEPS}`
+                    : streamingActive ? "Connecting…" : "Working…"}
                 </span>
               )}
             </div>
@@ -971,24 +982,25 @@ function StepItem({ step, isLast }) {
 function LiveTimelinePanel({ steps, active, endRef }) {
   if (steps.length === 0) {
     return (
-      <p className="text-sm leading-relaxed text-slate-400">
-        Each step the agent takes — locating you, comparing doctors, booking the slot — will
-        appear here live.
-      </p>
+      <div className="flex items-center gap-2 text-xs text-slate-400">
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-teal-400" />
+        Connecting to agent…
+      </div>
     );
   }
 
+  const lastIsPending = steps[steps.length - 1]?.status === "pending";
   return (
     <ol className="flex flex-col">
       {steps.map((step, i) => (
         <LiveStepItem key={step.id} step={step} isLast={i === steps.length - 1 && !active} />
       ))}
-      {active && (
-        <li className="flex gap-3">
+      {active && !lastIsPending && (
+        <li className="flex items-center gap-2.5 pt-1">
           <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-teal-300 bg-white/80">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-teal-500" />
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-teal-400" />
           </span>
-          <p className="pt-0.5 text-sm text-slate-500">Thinking…</p>
+          <p className="text-xs text-slate-400">Agent deciding next action…</p>
         </li>
       )}
       <div ref={endRef} />
@@ -997,37 +1009,70 @@ function LiveTimelinePanel({ steps, active, endRef }) {
 }
 
 function LiveStepItem({ step, isLast }) {
-  const isError = step.status === "error";
+  const isError   = step.status === "error";
   const isPending = step.status === "pending";
+  const isWrite   = !isPending && !isError &&
+    (step.step.includes("Appointment booked") || step.step.includes("Emergency appointment booked"));
+  const countMatch = typeof step.details === "string"
+    ? step.details.match(/^(\d+) found$/)
+    : null;
 
   return (
-    <li className="flex gap-3 animate-[fadeIn_150ms_ease-out]">
-      <div className="flex flex-col items-center">
+    <li className="flex gap-2.5 animate-[fadeIn_120ms_ease-out]">
+      <div className="flex flex-col items-center pt-0.5">
         <span
-          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full transition-transform duration-150 ${
+          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full transition-all duration-200 ${
             isError
-              ? "bg-red-100 text-red-600"
+              ? "bg-amber-100 text-amber-700 ring-1 ring-amber-200"
               : isPending
                 ? "border border-teal-300 bg-white/80"
-                : "scale-110 bg-gradient-to-br from-teal-600 to-emerald-600 text-white"
+                : isWrite
+                  ? "bg-emerald-600 text-white"
+                  : "bg-teal-600 text-white"
           }`}
         >
-          {isError ? (
-            <XSmallIcon />
-          ) : isPending ? (
-            <span className="h-2 w-2 animate-pulse rounded-full bg-teal-500" />
-          ) : (
-            <CheckSmallIcon />
-          )}
+          {isError   ? <XSmallIcon />
+           : isPending ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-teal-400" />
+           : <CheckSmallIcon />}
         </span>
-        {!isLast && <span className="w-px flex-1 bg-teal-900/10" />}
+        {!isLast && <span className="mt-0.5 w-px flex-1 bg-teal-900/10" />}
       </div>
-      <div className={isLast ? "" : "pb-4"}>
-        <p className="text-sm font-medium leading-5 text-slate-700">{step.step}</p>
-        {step.details && (
-          <p className="mt-0.5 break-all font-mono text-[11px] text-slate-400/90">
-            {step.details}
-          </p>
+      <div className={`min-w-0 flex-1 ${isLast ? "" : "pb-3"}`}>
+        {isWrite ? (
+          <div className="rounded-md border border-emerald-200 bg-emerald-50/70 px-2.5 py-1.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
+              appointments ← row committed
+            </p>
+            <p className="mt-0.5 font-mono text-[11px] text-emerald-800">{step.details}</p>
+          </div>
+        ) : isError ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50/70 px-2.5 py-1.5">
+            <p className="text-[11px] font-semibold text-amber-800">
+              Tool call failed — adjusting approach
+            </p>
+            {step.details && (
+              <p className="mt-0.5 text-[11px] text-amber-600">{step.details}</p>
+            )}
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
+            <p className={`text-xs leading-snug ${
+              isPending ? "text-slate-500" : "font-medium text-slate-700"
+            }`}>
+              {step.step}
+            </p>
+            {countMatch && (
+              <span className="rounded-full bg-teal-100 px-1.5 py-px text-[10px] font-semibold text-teal-700">
+                {countMatch[1]}
+              </span>
+            )}
+            {!countMatch && step.details && (
+              <span className="font-mono text-[11px] text-slate-400">{step.details}</span>
+            )}
+            {!isPending && step._ms != null && (
+              <span className="ml-auto text-[10px] tabular-nums text-slate-300">{step._ms}ms</span>
+            )}
+          </div>
         )}
       </div>
     </li>
