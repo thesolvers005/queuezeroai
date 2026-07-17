@@ -360,3 +360,96 @@ def cancel_booking(booking_id: str, user_id: str, reason: str, reason_detail: st
     )
     cancel_count = count_res.count if count_res.count is not None else len(count_res.data or [])
     return {"success": True, "cancellation_count": cancel_count}
+
+
+# ------------------------------------------------------------------
+# Admin dashboard stats
+# ------------------------------------------------------------------
+def get_admin_stats():
+    client = get_client()
+    today_str = date.today().isoformat()
+
+    # Doctor/hospital info — single query covers names + hospital mapping
+    doctor_rows = (
+        client.table("doctor_search_view")
+        .select("doctor_id, hospital_id, doctor_name, hospital_name")
+        .execute()
+        .data or []
+    )
+    doctor_info = {}
+    doctor_to_hospital = {}
+    hospital_names = {}
+    for d in doctor_rows:
+        did, hid = d["doctor_id"], d.get("hospital_id")
+        doctor_info[did] = {"doctor_name": d.get("doctor_name"), "hospital_name": d.get("hospital_name")}
+        doctor_to_hospital[did] = hid
+        if hid and hid not in hospital_names:
+            hospital_names[hid] = d.get("hospital_name")
+
+    # Slot totals from schedules — aggregate in Python, not DB
+    schedules = client.table("schedules").select("doctor_id, slots").execute().data or []
+    total_slots = available_slots = 0
+    h_total = {}
+    h_avail = {}
+    for sched in schedules:
+        slots = sched.get("slots") or []
+        hid = doctor_to_hospital.get(sched.get("doctor_id"))
+        avail = sum(1 for s in slots if s.get("is_available"))
+        total_slots += len(slots)
+        available_slots += avail
+        if hid:
+            h_total[hid] = h_total.get(hid, 0) + len(slots)
+            h_avail[hid] = h_avail.get(hid, 0) + avail
+
+    # Bookings today
+    today_res = (
+        client.table("appointments")
+        .select("id", count="exact")
+        .eq("appointment_date", today_str)
+        .neq("status", "cancelled")
+        .execute()
+    )
+    today_count = today_res.count or 0
+
+    # Recent bookings enriched from doctor_info (no per-row queries)
+    recent = (
+        client.table("appointments")
+        .select("*")
+        .neq("status", "cancelled")
+        .order("appointment_date", desc=True)
+        .order("appointment_time", desc=True)
+        .limit(30)
+        .execute()
+        .data or []
+    )
+    for b in recent:
+        info = doctor_info.get(b.get("doctor_id"), {})
+        b["doctor_name"] = info.get("doctor_name")
+        b["hospital_name"] = info.get("hospital_name")
+
+    hospital_capacity = sorted(
+        [
+            {
+                "hospital_id": hid,
+                "hospital_name": hospital_names.get(hid, "Unknown"),
+                "total": total,
+                "available": h_avail.get(hid, 0),
+                "booked": total - h_avail.get(hid, 0),
+            }
+            for hid, total in h_total.items()
+        ],
+        key=lambda x: x["booked"],
+        reverse=True,
+    )
+
+    return {
+        "counters": {
+            "total": total_slots,
+            "booked": total_slots - available_slots,
+            "available": available_slots,
+            "today": today_count,
+        },
+        "recent_bookings": recent,
+        "hospital_capacity": hospital_capacity,
+        "doctor_lookup": doctor_info,
+    }

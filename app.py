@@ -127,6 +127,14 @@ def _extract_user_id(authorization: Optional[str]) -> Optional[str]:
     return payload.get("sub") if payload else None
 
 
+def _require_admin(authorization: Optional[str]) -> dict:
+    payload = _require_auth(authorization)
+    row = db.get_client().table("users").select("is_admin").eq("id", payload["sub"]).maybe_single().execute()
+    if not row or not row.data or not row.data.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return payload
+
+
 # ------------------------------------------------------------------
 # Agent wiring (real provider with graceful mock fallback)
 # ------------------------------------------------------------------
@@ -285,6 +293,7 @@ class UserOut(BaseModel):
     id: str
     email: str
     name: str
+    is_admin: bool = False
 
 
 class AuthResponse(BaseModel):
@@ -617,7 +626,7 @@ async def auth_signup(req: SignupRequest):
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {"id": user_row["id"], "email": user_row["email"], "name": user_row["name"]},
+        "user": {"id": user_row["id"], "email": user_row["email"], "name": user_row["name"], "is_admin": user_row.get("is_admin", False)},
     }
 
 
@@ -627,7 +636,7 @@ async def auth_login(req: LoginRequest):
     password = req.password or ""
 
     client = db.get_client()
-    result = client.table("users").select("id, email, name, password_hash").eq("email", email).limit(1).execute()
+    result = client.table("users").select("id, email, name, password_hash, is_admin").eq("email", email).limit(1).execute()
     user_row = result.data[0] if result.data else None
 
     # Same message whether the email is unknown or the password is wrong, so a
@@ -639,7 +648,7 @@ async def auth_login(req: LoginRequest):
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {"id": user_row["id"], "email": user_row["email"], "name": user_row["name"]},
+        "user": {"id": user_row["id"], "email": user_row["email"], "name": user_row["name"], "is_admin": user_row.get("is_admin", False)},
     }
 
 
@@ -655,7 +664,7 @@ async def auth_verify(authorization: Optional[str] = Header(None)):
 
     client = db.get_client()
     result = (
-        client.table("users").select("id, email, name").eq("id", payload.get("sub")).limit(1).execute()
+        client.table("users").select("id, email, name, is_admin").eq("id", payload.get("sub")).limit(1).execute()
     )
     if not result.data:
         return JSONResponse(status_code=401, content={"valid": False})
@@ -663,8 +672,17 @@ async def auth_verify(authorization: Optional[str] = Header(None)):
     user_row = result.data[0]
     return {
         "valid": True,
-        "user": {"id": user_row["id"], "email": user_row["email"], "name": user_row["name"]},
+        "user": {"id": user_row["id"], "email": user_row["email"], "name": user_row["name"], "is_admin": user_row.get("is_admin", False)},
     }
+
+
+# ------------------------------------------------------------------
+# Admin dashboard
+# ------------------------------------------------------------------
+@app.get("/admin/stats")
+async def admin_stats(authorization: Optional[str] = Header(None)):
+    _require_admin(authorization)
+    return db.get_admin_stats()
 
 
 # ------------------------------------------------------------------
