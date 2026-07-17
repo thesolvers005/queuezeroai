@@ -30,7 +30,10 @@ QueueZero AI replaces the phone call with a conversation. A patient describes wh
 - **Real authentication** — signup/login backed by bcrypt password hashing and JWT sessions against a Supabase `users` table.
 - **Seeded, realistic demo data** — real hospital names, real city coordinates, and generated doctors/schedules/queues across 10 Indian cities, not placeholder mock data.
 
-## Demo
+## App Deployment
+**https://queuezeroai.vercel.app/
+
+## Live-Demo
 
 **[▶ Watch the live demo (2 min)](https://youtu.be/ViiwdQrSLR8?si=kI5-QwHQxthUiVa9)**
 
@@ -249,7 +252,7 @@ The Supabase database is seeded with real, structured demo data via `seed_data.p
 
 Every doctor also has a live `queues` row (current waiting count, average wait) that the agent factors into its recommendations.
 
-## Roadmap
+## Future Roadmap
 
 - **Multi-language support** — Hindi, Telugu, Tamil conversations (the agent already replies in whatever language the user writes in; broader testing and locale-aware prompts are next).
 - **Pharmacy + lab booking** — extend the same agent/tool pattern beyond doctor appointments.
