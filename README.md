@@ -1,172 +1,271 @@
-# QueueZero AI — Agent Core (Step 2)
+# QueueZero AI
 
-This replaces `agent.py` and `gsheet.py` from your original Streamlit project.
-`api.py` and `app.py` haven't been touched yet — that's Step 3 (backend) and
-Step 4 (UI). For now this is a standalone, testable agent.
+**An agentic hospital-appointment booking system — natural language in, a real confirmed appointment out, with the agent's reasoning streamed live to the UI.**
 
-## Two LLM providers, one interface
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.104-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
+![Supabase](https://img.shields.io/badge/Supabase-Postgres-3ECF8E?logo=supabase&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-Set `LLM_PROVIDER` in `.env` to switch — nothing else in the code needs to change:
+---
 
-- **`ollama`** (default) — free, runs locally via `llama3.1`, good for
-  development while shaking out plumbing bugs without spending credits.
-- **`anthropic`** — Claude via API, costs credits, noticeably stronger
-  multi-step reasoning. Use this for your actual demo/recording.
+## Problem Statement
 
-`agent.py` is the single entry point — it just picks which provider module
-(`claude_provider.py` or `ollama_provider.py`) to load based on that setting.
-Both expose the exact same `run_agent()` interface.
+In most of India, booking a doctor's appointment still means calling hospitals one at a time, describing your symptoms to a receptionist, and hoping someone picks up before you give up and drive to the ER instead. There is no unified view of which doctor is free, how long the queue actually is right now, or which nearby hospital could see you soonest. For anything urgent, that phone-tag costs the one thing patients don't have: time.
 
-## What changed vs. the old agent.py
+## Solution
 
-| Old (`agent.py`)                         | New                                                        |
-|-------------------------------------------|-------------------------------------------------------------|
-| Hardcoded `if/else` slot logic             | An LLM decides what to search for and how to compare options |
-| One department, fixed 3 slots              | Any specialization/gender/rating/distance/wait combination   |
-| Google Sheets via `gsheet.py`              | Supabase via `db.py`                                          |
-| Fixed reasoning strings                    | The model explains its actual tradeoffs in plain language     |
+QueueZero AI replaces the phone call with a conversation. A patient describes what they need in plain language — a specialization, a location, a time window, a preference — and an autonomous agent searches real hospital, doctor, and schedule data, weighs the tradeoffs (rating vs. distance vs. wait time) the way a person would, and books a real confirmed slot. Every reasoning step — which tool it called, what it found, why it picked one doctor over another — streams live to the UI as it happens, so the booking isn't a black box.
 
-## Files
+## Features
 
-- **`locations.py`** — resolves a place name ("Mangalagiri") to lat/lon. Demo
-  stand-in for a real geocoding API — same function signature either way.
-- **`distance.py`** — haversine distance calculation.
-- **`db.py`** — all Supabase queries (hospitals, doctors, schedules, booking,
-  notifications). No LLM code here — pure data access, replaces `gsheet.py`.
-- **`prompts.py`** — the shared system prompt (reasoning rules), used by both providers.
-- **`tools.py`** — the tool schemas (`resolve_location`, `search_hospitals`,
-  `find_doctors`, `find_available_slots`, `book_slot`, `emergency_book`,
-  `find_patient_by_name`, `send_notification`), the dispatcher that runs the
-  real function when a tool is called, and `to_openai_tools()` which converts
-  the schema into the format Ollama/OpenAI-style models expect.
-- **`claude_provider.py`** — the tool-calling loop using Anthropic's API.
-- **`ollama_provider.py`** — the same loop using a local Ollama model.
-- **`agent.py`** — picks a provider based on `LLM_PROVIDER` and re-exports its
-  `run_agent()`. This is what everything else imports.
+- **Live reasoning timeline** — the agent's tool calls (location resolve → doctor search → slot search → booking → notification) stream to the frontend in real time over Server-Sent Events, so you watch it think instead of waiting on a spinner. This is the centerpiece of the demo.
+- **Multi-provider LLM backend** — switch between Anthropic Claude, OpenRouter, or a local Ollama model with one environment variable; no code changes.
+- **Real tool-calling agent, not a script** — the model decides which tools to call, in what order, and when it has enough information to book, based on a shared system prompt.
+- **Tradeoff reasoning** — the agent compares doctors on rating, distance, and current wait time and explains its choice in plain language rather than just picking the top-rated result.
+- **Emergency mode** — urgent-language detection triggers a priority booking path that skips normal queue ordering and is separately audit-logged.
+- **Patient memory** — stored preferences (specialization, gender, hospital) are recalled and injected into the agent's context on repeat visits.
+- **Real email confirmations** — a successful booking triggers an actual confirmation email via Resend, independent of whether the model remembers to call the notification tool.
+- **Real authentication** — signup/login backed by bcrypt password hashing and JWT sessions against a Supabase `users` table.
+- **Seeded, realistic demo data** — real hospital names, real city coordinates, and generated doctors/schedules/queues across 10 Indian cities, not placeholder mock data.
 
-## Setup
+## Demo
 
-```bash
+**[▶ Watch the live demo (2 min)](https://youtu.be/ViiwdQrSLR8?si=kI5-QwHQxthUiVa9)**
+
+| | |
+|---|---|
+| ![Reasoning timeline mid-animation](docs/screenshots/timeline-live.png) | ![Booking confirmation](docs/screenshots/booking-confirmed.png) |
+| ![Chat / booking flow](docs/screenshots/chat-flow.png) | ![Sign in / account](docs/screenshots/auth-screen.png) |
+
+## Tech Stack
+
+| Technology | Why |
+|---|---|
+| **FastAPI** | Async Python backend with native `StreamingResponse` support for the SSE reasoning stream. |
+| **React + Vite** | Fast dev/build loop for the chat UI and live-updating reasoning timeline component. |
+| **Supabase (Postgres)** | Hosted Postgres for hospitals/doctors/schedules/queues/users, accessed via the Supabase Python client — no separate DB ops to manage. |
+| **Claude tool-calling** (Anthropic API) | Drives the agent's multi-step reasoning loop — decides which tools to call and in what order, with no hardcoded booking sequence. |
+| **SSE streaming** | Pushes each tool-call step to the frontend as it completes, powering the live reasoning timeline. |
+| **Resend** | Transactional email API for real booking-confirmation emails. |
+| **Railway** | Hosts the FastAPI backend. |
+| **Vercel** | Hosts the React frontend. |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    User([Patient]) --> UI[React UI<br/>queuezero-ui]
+    UI -->|POST /api/chat/stream| API[FastAPI<br/>app.py]
+    API --> Agent[agent.py<br/>provider dispatch]
+    Agent -->|LLM_PROVIDER| Claude[claude_provider.py]
+    Agent -->|LLM_PROVIDER| OR[openrouter_provider.py]
+    Agent -->|LLM_PROVIDER| Ollama[ollama_provider.py]
+    Claude --> Exec[tools.execute_tool]
+    OR --> Exec
+    Ollama --> Exec
+    Exec --> DB[(Supabase Postgres<br/>db.py)]
+    Exec --> Mail[Resend<br/>notifications.py]
+    Exec -.emit step.-> Queue[asyncio.Queue]
+    Queue -.SSE event.-> API
+    API -.data: step JSON.-> UI
+    UI --> Timeline[Reasoning Timeline<br/>live-animated]
+```
+
+The SSE path is explicit above: each tool call inside `tools.execute_tool` fires an `emit` hook installed per-request; `app.py`'s `/api/chat/stream` endpoint reads those events off an `asyncio.Queue` and yields them to the browser as they happen, which is what animates the timeline instead of waiting for the whole agent run to finish.
+
+## How the Agent Works
+
+The agent chooses its own tool sequence — this is not a scripted pipeline. For a typical booking request it ends up calling, in this order:
+
+1. **`resolve_location`** — turns a place name ("Mangalagiri") into coordinates so later searches can filter by distance.
+2. **`find_doctors`** — searches by specialization, gender, minimum rating, city, and/or distance, returning rating, experience, and current queue wait per doctor.
+3. **`find_available_slots`** — pulls open appointment slots for a chosen doctor, optionally filtered by date or time-of-day ("after 3pm").
+4. **`book_slot`** (or **`emergency_book`** for urgent cases) — reserves a specific date/time under the patient's name.
+5. **`send_notification`** — triggers the confirmation message; the backend also independently fires a real Resend email once a booking is detected, so confirmation delivery never depends on the model remembering this step.
+
+The model decides which of these to call, in what order, and whether it needs `search_hospitals` or `find_patient_by_name` along the way — the sequence above is what it typically converges on, not a hardcoded workflow. The tradeoff logic (weigh rating, distance, and wait together; relax the least important constraint if nothing fits) lives in the shared system prompt (`prompts.py`), not in application code.
+
+## Project Structure
+
+```
+queue2.0/
+├── app.py                    # FastAPI backend — /book, /api/chat/stream (SSE), /emergency,
+│                              #   /memory, /auth/signup|login|verify, /health, /ws
+├── agent.py                  # Picks claude_provider / openrouter_provider / ollama_provider
+│                              #   based on LLM_PROVIDER; re-exports run_agent()
+├── claude_provider.py        # Tool-calling loop against the Anthropic API
+├── openrouter_provider.py    # Same loop via OpenRouter (OpenAI-compatible SDK)
+├── ollama_provider.py        # Same loop against a local Ollama model
+├── tools.py                  # Tool schemas + dispatcher that executes real DB calls
+├── prompts.py                # Shared system prompt (reasoning rules) for all providers
+├── db.py                     # All Supabase queries — hospitals, doctors, schedules, booking
+├── locations.py               # Place-name → lat/lon resolver (demo stand-in for geocoding)
+├── distance.py                # Haversine distance calculation
+├── memory.py                  # In-memory patient preferences + conversation history
+├── emergency.py                # Emergency-mode keyword detection + audit log
+├── notifications.py           # Resend confirmation emails
+├── seed_data.py                # Idempotent Supabase demo-data seeder
+├── requirements.txt            # Python dependencies
+├── runtime.txt                 # Python version pin for Railway
+├── Procfile                     # Railway process command (uvicorn)
+├── .env.example                 # Documented environment variables (placeholders only)
+├── test.py                       # Manual end-to-end agent test script
+├── test_db.py                     # Manual db.py test script (no LLM involved)
+└── queuezero-ui/                  # React + Vite frontend
+    ├── src/
+    │   ├── App.jsx                 # Main app: chat, reasoning timeline, auth, booking UI
+    │   ├── App.css / index.css      # Styles
+    │   └── main.jsx                  # React entry point
+    ├── index.html
+    ├── vite.config.js
+    └── package.json
+```
+
+## Prerequisites
+
+| Requirement | Version | Why |
+|---|---|---|
+| Python | 3.11 (pinned in `runtime.txt`) | Runs the FastAPI backend and the agent. |
+| pip | any recent | Installs backend dependencies from `requirements.txt`. |
+| Node.js | 20.19+ or 22.12+ | Vite 8.1 (`queuezero-ui/package.json`) requires it — verified against Vite 8's published Node requirement. |
+| npm | bundled with Node | Installs frontend dependencies. |
+| Git | any recent | To clone the repo. |
+| A Supabase project (free tier) | — | Hosts hospitals/doctors/schedules/queues/users; the schema must be applied and `seed_data.py` run before booking works. |
+| **One of:** Anthropic API key, OpenRouter API key (free tier works), or a local Ollama install with a model pulled | — | The agent needs exactly one LLM backend — whichever `LLM_PROVIDER` points at. |
+| Resend API key | **Optional** | Only powers the confirmation email step; booking itself works without it. |
+
+> Developed on Windows — the commands in this README are PowerShell, but nothing in the stack (Python, Node, FastAPI, Vite) is Windows-only.
+
+## Installation
+
+Windows PowerShell commands (this repo is developed on Windows):
+
+**Backend**
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env
+Copy-Item .env.example .env
+# then edit .env and fill in your keys
 ```
 
-For the Ollama path (default):
-```bash
-ollama pull llama3.1     # if you haven't already
-ollama serve              # usually already running as a background service
-```
-Leave `LLM_PROVIDER=ollama` in `.env`.
+**Frontend**
 
-For the Claude path, set `LLM_PROVIDER=anthropic` and fill in `ANTHROPIC_API_KEY`.
-
-## Demo mode without Anthropic credits
-
-Set `LLM_PROVIDER=openrouter` in `.env`. This routes the same agent loop
-through [OpenRouter](https://openrouter.ai) via the OpenAI SDK
-(`pip install openai`) — no Anthropic credits needed:
-
-```
-LLM_PROVIDER=openrouter
-OPENROUTER_API_KEY=sk-or-...          # from https://openrouter.ai/keys
-FALLBACK_MODEL=meta-llama/llama-3.3-70b-instruct:free
+```powershell
+cd queuezero-ui
+npm install
+cd ..
 ```
 
-Tool definitions aren't duplicated — `openrouter_provider.py` reuses the same
-`to_openai_tools()` conversion the Ollama provider uses, and returns the same
-`{reply, steps, history}` shape, so the backend, memory, and emergency mode
-work unchanged. Free models are shakier at tool calling than Claude; malformed
-tool-call JSON is caught and fed back to the model instead of crashing.
+## Configuration
 
-Either way, `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are always required
-(Step 1's schema + seed data must already be applied).
+Copy `.env.example` to `.env` and fill in the values below. `LLM_PROVIDER` switches which model backend the agent uses — `anthropic`, `openrouter`, or `ollama` — with no code changes required.
 
-## Email confirmations (Resend)
+| Variable | Required? | What it's for |
+|---|---|---|
+| `LLM_PROVIDER` | Yes | `anthropic` \| `openrouter` \| `ollama` — selects the agent's model backend. Default `anthropic`. |
+| `ANTHROPIC_API_KEY` | If `LLM_PROVIDER=anthropic` | Claude API key. |
+| `OPENROUTER_API_KEY` | If `LLM_PROVIDER=openrouter` | OpenRouter API key (get one at openrouter.ai/keys). |
+| `FALLBACK_MODEL` | If `LLM_PROVIDER=openrouter` | OpenRouter model id, e.g. `meta-llama/llama-3.3-70b-instruct:free`. |
+| `OLLAMA_MODEL` | If `LLM_PROVIDER=ollama` | Local Ollama model name. Default `llama3.1`. |
+| `SUPABASE_URL` | Yes | Your Supabase project URL. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Supabase service-role key (server-side only — never expose to the frontend). |
+| `USE_MOCK_AGENT` | No | `true` runs a canned mock booking flow with no API key needed. Default `false`. |
+| `JWT_SECRET` | **Required** | Signing secret for auth session tokens. ⚠️ If unset, `app.py` falls back to a hardcoded dev value that is **public in this repo's source** — anyone who reads the code can forge tokens. You **must** override it with your own secret in any deployment. |
+| `RESEND_API_KEY` | For live email | Resend API key for booking confirmation emails. |
+| `FROM_EMAIL` | For live email | Verified sender address, e.g. `QueueZero <bookings@yourdomain.com>`. |
+| `PATIENT_EMAIL` | No | Demo fallback recipient when the booking form has no email field value. |
+| `VITE_API_URL` (frontend, `queuezero-ui/.env`) | No | Backend base URL for the frontend. Default `http://localhost:8000`. |
 
-After a successful booking, the agent's `send_notification` step also sends a
-real confirmation email (an appointment-slip layout matching the UI's green
-card) via [Resend](https://resend.com). This only happens in live mode — in
-mock mode (`USE_MOCK_AGENT=true`) the notification stays a print stub.
+## Usage
 
-Setup:
+### First run
 
-1. `pip install resend` (already in `requirements.txt`).
-2. Create an API key at <https://resend.com/api-keys> and set `RESEND_API_KEY`
-   in `.env`.
-3. **Verify your sending domain**: in the Resend dashboard go to
-   *Domains → Add domain*, enter the domain you'll send from, then add the
-   DKIM/SPF DNS records Resend shows you at your DNS provider and wait for the
-   status to turn **Verified**. Set `FROM_EMAIL` to an address on that domain,
-   e.g. `QueueZero <bookings@yourdomain.com>`. Without a verified domain you
-   can only use Resend's sandbox sender `onboarding@resend.dev`, which is fine
-   for testing but only delivers to your own Resend account email.
-4. The recipient comes from the booking form's email field; if the field is
-   left empty, the `PATIENT_EMAIL` env var is used as a demo fallback.
+```powershell
+# 1. Clone
+git clone <repo-url>
+cd queue2.0
 
-Email failures never block a booking — `notifications.py` catches everything,
-logs a warning, and reports `{"sent": false, "error": ...}` in the tool result.
+# 2. Backend venv + install
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 
-## Try it
+# 3. Frontend install
+cd queuezero-ui
+npm install
+cd ..
 
-```bash
-python3 agent.py
+# 4. Configure environment
+Copy-Item .env.example .env
+# edit .env: fill SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, JWT_SECRET, and
+# whichever one of ANTHROPIC_API_KEY / OPENROUTER_API_KEY / OLLAMA_MODEL you need
+
+# 5. Apply the Supabase schema (SQL editor in your Supabase dashboard — see the
+# table definitions documented at the top of seed_data.py) then seed demo data
+python seed_data.py
+
+# 6. Start backend + frontend (two terminals)
+uvicorn app:app --reload --port 8000        # terminal 1
+cd queuezero-ui; npm run dev                # terminal 2
+
+# 7. Open http://localhost:5173 and send an example query (below)
 ```
 
-This runs a canned request through the full loop and prints each tool call
-plus the final reasoned answer — e.g. it will call `resolve_location` for
-"Mangalagiri", then `find_doctors` with the gender/specialization/distance
-filters, then `find_available_slots`, then `book_slot`, then
-`send_notification`, and finally explain which doctor it picked and why.
+**Run the backend** (from the repo root, with the venv active):
 
-For your own test, open a `python3` shell:
-
-```python
-from agent import run_agent
-result = run_agent("I need a dermatologist tomorrow morning, my name is Ravi Kumar.")
-print(result["reply"])
-for step in result["steps"]:
-    print(step)
+```powershell
+uvicorn app:app --reload --port 8000
 ```
 
-`result["history"]` is the running message list — pass it back into
-`run_agent()` as `conversation_history` for multi-turn conversations (e.g. the
-agent asks a clarifying question, the user replies, you continue the same
-thread instead of starting over).
+**Run the frontend** (in a second terminal):
 
-## A note on local model quality
+```powershell
+cd queuezero-ui
+npm run dev
+```
 
-`llama3.1` (and most local models) are meaningfully less reliable than Claude
-at strict multi-step tool calling — expect occasional malformed tool calls,
-weaker tradeoff reasoning (e.g. it might just pick the highest-rated doctor
-without genuinely weighing distance/wait), or shallower final explanations.
-That's a model capability gap, not a bug in this code. Use Ollama to confirm
-the plumbing works (right tools called, DB queries succeed, booking completes),
-then switch to `LLM_PROVIDER=anthropic` once you're ready to show the real
-reasoning quality — that's what the "AI agent, not rule-based automation"
-pitch in your original spec actually depends on.
+**Example queries** (typed into the chat UI):
 
-## Design notes
+```
+I need a dermatologist tomorrow morning near Mangalagiri, my name is Ravi Kumar.
+```
 
-- **Tool granularity matches your original spec** (`search_hospitals`,
-  `find_doctors`, `find_available_slots`, `book_slot`, `send_notification`) —
-  the model chains them itself; nothing here decides the order in advance.
-- **Reasoning is in the system prompt, not hardcoded logic** — the tradeoff
-  guidance (constraints first, then weigh rating/distance/wait together,
-  relax the least important constraint if nothing fits) mirrors the Doctor
-  A vs. Doctor B example in your spec, but the model applies it to whatever
-  data actually comes back, not a scripted scenario.
-- **`emergency_book`** is a separate tool rather than a flag on `book_slot`,
-  so the system prompt can tell the model exactly when it's allowed to use it
-  (only for genuinely urgent situations) instead of leaving that judgment
-  call to slip through unnoticed.
-- **`MAX_TOOL_ROUNDS = 8`** is a safety cap — if the agent gets stuck
-  looping between tool calls without reaching an answer, it stops and asks
-  the user to narrow the request instead of hanging forever.
+```
+Book me the earliest cardiologist appointment after 3pm in Hyderabad, I'm Priya Sharma.
+```
 
-## Next step
+## Data
 
-Step 3: wrap `run_agent()` in a FastAPI backend (replacing `api.py`) with a
-proper chat endpoint, so the frontend can stream tool-call progress to the
-UI's "Reasoning Timeline" as each step completes — that's what the `on_step`
-callback in `run_agent()` is already set up for.
+The Supabase database is seeded with real, structured demo data via `seed_data.py` — not mock stubs:
 
+- **54 hospitals** across real sub-locality coordinates
+- **440 doctors** spread across specializations (Cardiology, ENT, Dermatology, Orthopedics, Neurology, Psychiatry, Pediatrics, Gynecology, General Medicine, Dentistry)
+- **3,680 appointment schedules** with live per-slot availability
+- **10 Indian cities** — Hyderabad, Vijayawada, Mangalagiri, Guntur, Bangalore, Chennai, Mumbai, Pune, Delhi, Kolkata
+
+Every doctor also has a live `queues` row (current waiting count, average wait) that the agent factors into its recommendations.
+
+## Roadmap
+
+- **Multi-language support** — Hindi, Telugu, Tamil conversations (the agent already replies in whatever language the user writes in; broader testing and locale-aware prompts are next).
+- **Pharmacy + lab booking** — extend the same agent/tool pattern beyond doctor appointments.
+- **SMS/voice for feature phones** — reach patients without a smartphone or reliable data connection.
+- **National scale** — expand seeded coverage beyond the current 10 cities toward full national hospital coverage.
+
+## Team
+
+**The Solvers**
+
+| Name | Role | GitHub |
+|---|---|---|
+| Abdul Bashith Rompicherla | AI Agent Architect | [@bashith1407-ops](https://github.com/bashith1407-ops) |
+| Vasireddi Nithya Santhoshini | Healthcare AI Lead | [@nithyaV-dev](https://github.com/nithyaV-dev) |
+| Pallerla Devasena Reddy | Backend Engineer | [@pallerladevasenareddy-a11y](https://github.com/pallerladevasenareddy-a11y) |
+
+## License
+
+MIT — see [LICENSE](LICENSE).
