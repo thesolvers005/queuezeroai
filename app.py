@@ -109,6 +109,24 @@ def decode_token(token: str) -> Optional[dict]:
         return None
 
 
+def _require_auth(authorization: Optional[str]) -> dict:
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[len("Bearer "):].strip()
+    payload = decode_token(token) if token else None
+    if not payload:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    return payload
+
+
+def _extract_user_id(authorization: Optional[str]) -> Optional[str]:
+    """Returns the user_id from a Bearer token, or None if absent/invalid."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    payload = decode_token(authorization[len("Bearer "):].strip())
+    return payload.get("sub") if payload else None
+
+
 # ------------------------------------------------------------------
 # Agent wiring (real provider with graceful mock fallback)
 # ------------------------------------------------------------------
@@ -354,21 +372,25 @@ def extract_appointment_from_steps(steps: List[dict]) -> Optional[dict]:
 # Main booking endpoint
 # ------------------------------------------------------------------
 @app.post("/book", response_model=BookResponse)
-async def book_appointment(req: BookRequest):
+async def book_appointment(req: BookRequest, authorization: Optional[str] = Header(None)):
     history = _get_session(req.session_id, prefix="sess")
     session_id = history.session_id
+
+    user_id = _extract_user_id(authorization)
+    if user_id:
+        db.set_booking_user(user_id)
 
     is_emergency = should_trigger_emergency(req.user_message)
     extra_system = _build_extra_system(req.patient_name, is_emergency)
 
-    # run_agent appends the user message and its own tool/assistant messages,
-    # then returns the full updated history -- so we pass the stored list in and
-    # store the returned list back. We do NOT add the user message ourselves.
-    result = run_agent(
-        req.user_message,
-        conversation_history=history.get_messages(),
-        extra_system=extra_system,
-    )
+    try:
+        result = run_agent(
+            req.user_message,
+            conversation_history=history.get_messages(),
+            extra_system=extra_system,
+        )
+    finally:
+        db.clear_booking_user()
     history.set_messages(result.get("history", []))
 
     appointment = extract_appointment_from_steps(result.get("steps", []))
@@ -398,11 +420,13 @@ async def book_appointment(req: BookRequest):
 # ------------------------------------------------------------------
 # Streaming booking endpoint (SSE) -- reasoning-timeline foundation
 # ------------------------------------------------------------------
-def _run_agent_with_tool_events(emit, user_message, conversation_history, extra_system):
+def _run_agent_with_tool_events(emit, user_message, conversation_history, extra_system, user_id=None):
     """Runs on the executor thread: installs the per-thread emit hook that
     tools.execute_tool reads (see tools.py), so real tool-dispatch timing is
     observed without any change to claude_provider.py's tool-calling loop."""
     tools.set_emit_hook(emit)
+    if user_id:
+        db.set_booking_user(user_id)
     try:
         return run_agent(
             user_message,
@@ -411,10 +435,11 @@ def _run_agent_with_tool_events(emit, user_message, conversation_history, extra_
         )
     finally:
         tools.clear_emit_hook()
+        db.clear_booking_user()
 
 
 @app.post("/api/chat/stream")
-async def chat_stream(req: BookRequest):
+async def chat_stream(req: BookRequest, authorization: Optional[str] = Header(None)):
     """Streams each real agent reasoning/tool step as it happens (Server-Sent
     Events), for an animated reasoning timeline in the frontend. Purely
     additive -- POST /book is untouched and keeps working exactly as before.
@@ -427,6 +452,7 @@ async def chat_stream(req: BookRequest):
     history = _get_session(req.session_id, prefix="sess")
     session_id = history.session_id
 
+    user_id = _extract_user_id(authorization)
     is_emergency = should_trigger_emergency(req.user_message)
     extra_system = _build_extra_system(req.patient_name, is_emergency)
 
@@ -441,7 +467,7 @@ async def chat_stream(req: BookRequest):
             result = await loop.run_in_executor(
                 None,
                 lambda: _run_agent_with_tool_events(
-                    emit, req.user_message, history.get_messages(), extra_system
+                    emit, req.user_message, history.get_messages(), extra_system, user_id
                 ),
             )
             history.set_messages(result.get("history", []))
@@ -639,6 +665,33 @@ async def auth_verify(authorization: Optional[str] = Header(None)):
         "valid": True,
         "user": {"id": user_row["id"], "email": user_row["email"], "name": user_row["name"]},
     }
+
+
+# ------------------------------------------------------------------
+# User bookings
+# ------------------------------------------------------------------
+class CancelRequest(BaseModel):
+    reason: str
+    reason_detail: Optional[str] = None
+
+
+@app.get("/api/bookings/mine")
+async def my_bookings(authorization: Optional[str] = Header(None)):
+    payload = _require_auth(authorization)
+    return {"bookings": db.get_user_bookings(payload["sub"])}
+
+
+@app.post("/api/bookings/{booking_id}/cancel")
+async def cancel_my_booking(
+    booking_id: str,
+    req: CancelRequest,
+    authorization: Optional[str] = Header(None),
+):
+    payload = _require_auth(authorization)
+    result = db.cancel_booking(booking_id, payload["sub"], req.reason, req.reason_detail)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 # ------------------------------------------------------------------

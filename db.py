@@ -7,6 +7,7 @@ them as Claude tool calls.
 """
 
 import os
+import threading
 from datetime import date, datetime, timedelta
 
 from dotenv import load_dotenv
@@ -24,6 +25,16 @@ SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip() or None
 SUPABASE_KEY = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip() or None
 
 _client = None
+_local = threading.local()
+
+
+def set_booking_user(user_id):
+    """Store the authenticated user_id on the current thread so book_slot can tag the appointment."""
+    _local.user_id = user_id
+
+
+def clear_booking_user():
+    _local.user_id = None
 
 
 def get_client():
@@ -179,6 +190,7 @@ def book_slot(doctor_id, target_date, target_time, patient_name, patient_id=None
         "appointment_time": target_time,
         "status": "booked",
         "is_emergency": is_emergency,
+        "user_id": getattr(_local, "user_id", None),
     }
     try:
         inserted = client.table("appointments").insert(appointment).execute()
@@ -247,3 +259,104 @@ def send_notification(patient_name, message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[NOTIFY {timestamp}] To {patient_name}: {message}")
     return {"success": True, "delivered_at": timestamp}
+
+
+# ------------------------------------------------------------------
+# User bookings (history + cancellation)
+# ------------------------------------------------------------------
+CANCEL_REASONS = {
+    "schedule_conflict", "found_another_doctor", "recovered",
+    "emergency", "booked_by_mistake", "other",
+}
+
+
+def get_user_bookings(user_id: str):
+    client = get_client()
+    result = (
+        client.table("appointments")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("appointment_date", desc=True)
+        .order("appointment_time", desc=True)
+        .execute()
+    )
+    bookings = result.data or []
+
+    # Batch-enrich with doctor/hospital names (one query per unique doctor_id)
+    seen = {}
+    for b in bookings:
+        did = b.get("doctor_id")
+        if did and did not in seen:
+            doc = (
+                client.table("doctor_search_view")
+                .select("doctor_id, doctor_name, hospital_name")
+                .eq("doctor_id", did)
+                .maybe_single()
+                .execute()
+            )
+            seen[did] = doc.data if (doc and doc.data) else {}
+        info = seen.get(did, {})
+        b["doctor_name"] = info.get("doctor_name")
+        b["hospital_name"] = info.get("hospital_name")
+
+    return bookings
+
+
+def cancel_booking(booking_id: str, user_id: str, reason: str, reason_detail: str = None):
+    if reason not in CANCEL_REASONS:
+        return {"success": False, "error": f"Invalid reason. Valid options: {', '.join(sorted(CANCEL_REASONS))}"}
+    if reason == "other" and not (reason_detail or "").strip():
+        return {"success": False, "error": "reason_detail is required when reason is 'other'."}
+
+    client = get_client()
+    row = (
+        client.table("appointments")
+        .select("*")
+        .eq("id", booking_id)
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    if not row or not row.data:
+        return {"success": False, "error": "Booking not found or does not belong to you."}
+
+    booking = row.data
+    if booking["status"] == "cancelled":
+        return {"success": False, "error": "Booking is already cancelled."}
+
+    # 1. Mark appointment cancelled
+    client.table("appointments").update({"status": "cancelled"}).eq("id", booking_id).execute()
+
+    # 2. Free the slot back in schedules so it can be rebooked
+    sched = (
+        client.table("schedules")
+        .select("*")
+        .eq("doctor_id", booking["doctor_id"])
+        .eq("date", booking["appointment_date"])
+        .maybe_single()
+        .execute()
+    )
+    if sched and sched.data:
+        slots = sched.data["slots"]
+        for s in slots:
+            if s["time"] == booking["appointment_time"]:
+                s["is_available"] = True
+        client.table("schedules").update({"slots": slots}).eq("id", sched.data["id"]).execute()
+
+    # 3. Record the cancellation for audit / analytics
+    client.table("cancellations").insert({
+        "booking_id": booking_id,
+        "user_id": user_id,
+        "reason": reason,
+        "reason_detail": reason_detail or None,
+    }).execute()
+
+    # 4. Return total cancellation count for the user (shown in UI)
+    count_res = (
+        client.table("cancellations")
+        .select("id", count="exact")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    cancel_count = count_res.count if count_res.count is not None else len(count_res.data or [])
+    return {"success": True, "cancellation_count": cancel_count}

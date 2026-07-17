@@ -12,6 +12,15 @@ import React, { useState, useRef, useEffect } from "react";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const TOKEN_KEY = "queuezero_token";
 
+const CANCEL_REASONS = [
+  { value: "schedule_conflict", label: "Schedule conflict" },
+  { value: "found_another_doctor", label: "Found another doctor" },
+  { value: "recovered", label: "Recovered / no longer needed" },
+  { value: "emergency", label: "Emergency arose" },
+  { value: "booked_by_mistake", label: "Booked by mistake" },
+  { value: "other", label: "Other" },
+];
+
 const STEP_LABELS = {
   resolve_location: "Located the area",
   search_hospitals: "Searched nearby hospitals",
@@ -49,10 +58,6 @@ const WHEN_OPTIONS = [
 ];
 
 export default function QueueZeroApp() {
-  // Real auth: the JWT issued by /auth/login or /auth/signup is persisted in
-  // localStorage under TOKEN_KEY so the session survives a refresh. name/email
-  // come from the verified user record and are used to pre-fill the booking
-  // payload exactly as before.
   const [user, setUser] = useState(null);
   const [authChecking, setAuthChecking] = useState(true);
   const [messages, setMessages] = useState([]);
@@ -68,6 +73,18 @@ export default function QueueZeroApp() {
   const [streamingSteps, setStreamingSteps] = useState([]);
   const [streamingActive, setStreamingActive] = useState(false);
   const [liveMode, setLiveMode] = useState(true);
+
+  // Bookings panel state
+  const [showBookings, setShowBookings] = useState(false);
+  const [bookings, setBookings] = useState([]);
+  const [bookingsLoading, setBookingsLoading] = useState(false);
+  const [cancelModal, setCancelModal] = useState(null); // {id, doctor_name, appointment_date, appointment_time}
+  const [cancelReason, setCancelReason] = useState("");
+  const [cancelDetail, setCancelDetail] = useState("");
+  const [cancelError, setCancelError] = useState("");
+  const [cancelSubmitting, setCancelSubmitting] = useState(false);
+  const [cancelCount, setCancelCount] = useState(null);
+
   const messagesEndRef = useRef(null);
   const timelineEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -106,12 +123,73 @@ export default function QueueZeroApp() {
   }, []);
 
   useEffect(() => {
+    if (showBookings) loadBookings();
+  }, [showBookings]);
+
+  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
   useEffect(() => {
     timelineEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [streamingSteps]);
+
+  const loadBookings = async () => {
+    setBookingsLoading(true);
+    setCancelCount(null);
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const r = await fetch(`${API_URL}/api/bookings/mine`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await r.json();
+      setBookings(data.bookings || []);
+    } catch {
+      // silently fail — panel will show empty state
+    } finally {
+      setBookingsLoading(false);
+    }
+  };
+
+  const openCancelModal = (booking) => {
+    setCancelModal(booking);
+    setCancelReason("");
+    setCancelDetail("");
+    setCancelError("");
+  };
+
+  const submitCancel = async () => {
+    if (!cancelModal || !cancelReason) return;
+    if (cancelReason === "other" && !cancelDetail.trim()) {
+      setCancelError("Please describe the reason.");
+      return;
+    }
+    setCancelSubmitting(true);
+    setCancelError("");
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const r = await fetch(`${API_URL}/api/bookings/${cancelModal.id}/cancel`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          reason: cancelReason,
+          reason_detail: cancelDetail || undefined,
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || "Cancellation failed.");
+      setCancelCount(data.cancellation_count);
+      setCancelModal(null);
+      loadBookings();
+    } catch (err) {
+      setCancelError(err.message);
+    } finally {
+      setCancelSubmitting(false);
+    }
+  };
 
   const sendMessage = async (text) => {
     const userMessage = (text ?? inputValue).trim();
@@ -123,9 +201,13 @@ export default function QueueZeroApp() {
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
 
     try {
+      const token = localStorage.getItem(TOKEN_KEY);
       const response = await fetch(`${API_URL}/book`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
           user_message: userMessage,
           patient_name: patientName || undefined,
@@ -177,9 +259,13 @@ export default function QueueZeroApp() {
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
 
     try {
+      const token = localStorage.getItem(TOKEN_KEY);
       const response = await fetch(`${API_URL}/api/chat/stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
           user_message: userMessage,
           patient_name: patientName || undefined,
@@ -264,8 +350,6 @@ export default function QueueZeroApp() {
     if (liveMode) {
       streamBooking(t);
     } else {
-      // Clear any leftover live timeline so the static panel (driven by
-      // panelSteps from the latest assistant message) takes over again.
       setStreamingSteps([]);
       sendMessage(t);
     }
@@ -278,8 +362,6 @@ export default function QueueZeroApp() {
     }
   };
 
-  // Quick-select composes a natural-language draft into the normal input;
-  // the user edits/sends it like any typed message (same handler, same /book).
   const composeQuickBook = (spec, whenKey) => {
     setQuickSpec(spec);
     setQuickWhen(whenKey);
@@ -289,9 +371,6 @@ export default function QueueZeroApp() {
     inputRef.current?.focus();
   };
 
-  // Called by AuthScreen after a real /auth/signup or /auth/login succeeds.
-  // patientName/patientEmail feed the /book payload exactly as before — only
-  // their source changes (verified account instead of manual entry).
   const handleAuth = (userRecord) => {
     setUser(userRecord);
     setPatientName(userRecord.name || "");
@@ -306,6 +385,10 @@ export default function QueueZeroApp() {
     setMessages([]);
     setIsEmergency(false);
     setSessionId(`sess_${Date.now()}`);
+    setShowBookings(false);
+    setBookings([]);
+    setCancelModal(null);
+    setCancelCount(null);
   };
 
   if (authChecking) {
@@ -325,7 +408,6 @@ export default function QueueZeroApp() {
 
   return (
     <div className="relative h-screen overflow-hidden bg-[#f2f8f6] text-slate-800">
-      {/* soft teal backdrop blobs so the glass has something to blur */}
       <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="absolute -top-32 -left-24 h-96 w-96 rounded-full bg-teal-200/50 blur-3xl" />
         <div className="absolute top-1/3 -right-28 h-[28rem] w-[28rem] rounded-full bg-emerald-200/45 blur-3xl" />
@@ -333,7 +415,12 @@ export default function QueueZeroApp() {
       </div>
 
       <div className="relative z-10 flex h-full flex-col">
-        <Header health={health} user={user} onLogout={handleLogout} />
+        <Header
+          health={health}
+          user={user}
+          onLogout={handleLogout}
+          onShowBookings={() => setShowBookings(true)}
+        />
 
         {isEmergency && (
           <div className="mx-auto mt-3 w-full max-w-6xl px-4">
@@ -369,7 +456,6 @@ export default function QueueZeroApp() {
 
             {/* Input bar */}
             <div className="border-t border-white/70 bg-white/50 p-4 backdrop-blur-xl">
-              {/* Quick-book helper row — composes a draft, never submits itself */}
               <div className="mb-3 flex flex-wrap items-center gap-2">
                 <select
                   value={quickSpec}
@@ -499,11 +585,37 @@ export default function QueueZeroApp() {
           </aside>
         </main>
       </div>
+
+      {/* My Bookings slide-over */}
+      {showBookings && (
+        <BookingsPanel
+          bookings={bookings}
+          loading={bookingsLoading}
+          cancelCount={cancelCount}
+          onClose={() => setShowBookings(false)}
+          onCancel={openCancelModal}
+        />
+      )}
+
+      {/* Cancel modal — sits above the slide-over */}
+      {cancelModal && (
+        <CancelModal
+          booking={cancelModal}
+          reason={cancelReason}
+          detail={cancelDetail}
+          error={cancelError}
+          submitting={cancelSubmitting}
+          onReasonChange={setCancelReason}
+          onDetailChange={setCancelDetail}
+          onConfirm={submitCancel}
+          onClose={() => setCancelModal(null)}
+        />
+      )}
     </div>
   );
 }
 
-function Header({ health, user, onLogout }) {
+function Header({ health, user, onLogout, onShowBookings }) {
   const pill =
     health.status === "up"
       ? {
@@ -551,6 +663,15 @@ function Header({ health, user, onLogout }) {
           )}
           {user && (
             <button
+              onClick={onShowBookings}
+              className="flex items-center gap-1.5 rounded-full border border-teal-900/10 bg-white/70 px-3 py-1 text-xs font-medium text-slate-600 backdrop-blur transition hover:border-teal-400 hover:text-teal-800"
+            >
+              <CalendarIcon />
+              My bookings
+            </button>
+          )}
+          {user && (
+            <button
               onClick={onLogout}
               className="flex items-center gap-1.5 rounded-full border border-teal-900/10 bg-white/70 px-3 py-1 text-xs font-medium text-slate-600 backdrop-blur transition hover:border-teal-400 hover:text-teal-800"
             >
@@ -563,6 +684,199 @@ function Header({ health, user, onLogout }) {
     </header>
   );
 }
+
+// ------------------------------------------------------------------
+// Bookings panel (slide-over from right)
+// ------------------------------------------------------------------
+function BookingsPanel({ bookings, loading, cancelCount, onClose, onCancel }) {
+  const today = new Date().toISOString().split("T")[0];
+  const upcoming = bookings.filter((b) => b.status !== "cancelled" && b.appointment_date >= today);
+  const past = bookings.filter((b) => b.status === "cancelled" || b.appointment_date < today);
+
+  return (
+    <div className="fixed inset-0 z-50 flex">
+      <div
+        className="absolute inset-0 bg-slate-900/20 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      <div className="relative ml-auto h-full w-full max-w-md overflow-y-auto border-l border-white/70 bg-white/90 shadow-2xl backdrop-blur-xl">
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-white/70 bg-white/80 px-5 py-4 backdrop-blur">
+          <h2 className="font-semibold text-slate-800">My Bookings</h2>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+          >
+            <XIcon />
+          </button>
+        </div>
+
+        {cancelCount != null && (
+          <div className="mx-4 mt-4 rounded-xl border border-amber-200 bg-amber-50/80 px-4 py-2.5 text-sm text-amber-800">
+            Cancellation recorded. You have cancelled{" "}
+            <span className="font-semibold">{cancelCount}</span> booking
+            {cancelCount !== 1 ? "s" : ""} total.
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex justify-center py-16">
+            <span className="h-6 w-6 animate-spin rounded-full border-2 border-teal-600 border-t-transparent" />
+          </div>
+        ) : (
+          <div className="space-y-6 p-4">
+            {bookings.length === 0 ? (
+              <p className="py-12 text-center text-sm text-slate-400">
+                No bookings yet. Book your first appointment to see it here.
+              </p>
+            ) : (
+              <>
+                <BookingSection title="Upcoming" items={upcoming} onCancel={onCancel} showCancel />
+                <BookingSection title="Past & Cancelled" items={past} />
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BookingSection({ title, items, onCancel, showCancel }) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
+        {title}
+      </h3>
+      <div className="space-y-3">
+        {items.map((b) => (
+          <BookingCard key={b.id} booking={b} onCancel={onCancel} showCancel={showCancel} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BookingCard({ booking, onCancel, showCancel }) {
+  const isCancelled = booking.status === "cancelled";
+  return (
+    <div
+      className={`rounded-xl border p-4 ${
+        isCancelled
+          ? "border-slate-200 bg-slate-50/80"
+          : "border-teal-200/80 bg-teal-50/60"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-slate-800">
+            {booking.doctor_name || "Doctor"}
+          </p>
+          <p className="text-xs text-slate-500">{booking.hospital_name || "—"}</p>
+        </div>
+        {isCancelled ? (
+          <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-500">
+            Cancelled
+          </span>
+        ) : booking.is_emergency ? (
+          <span className="shrink-0 rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700">
+            Emergency
+          </span>
+        ) : null}
+      </div>
+      <div className="mt-2 flex gap-3 text-xs text-slate-500">
+        <span>{booking.appointment_date}</span>
+        <span>{booking.appointment_time}</span>
+      </div>
+      {showCancel && !isCancelled && (
+        <button
+          onClick={() => onCancel(booking)}
+          className="mt-3 w-full rounded-lg border border-red-200 py-1.5 text-xs font-medium text-red-600 transition hover:bg-red-50 active:scale-[0.99]"
+        >
+          Cancel booking
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------
+// Cancel modal
+// ------------------------------------------------------------------
+function CancelModal({
+  booking, reason, detail, error, submitting,
+  onReasonChange, onDetailChange, onConfirm, onClose,
+}) {
+  const canSubmit = reason && (reason !== "other" || detail.trim());
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center px-4">
+      <div className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-sm rounded-2xl border border-white/70 bg-white/90 p-6 shadow-2xl backdrop-blur-xl">
+        <h3 className="mb-1 text-base font-semibold text-slate-800">Cancel booking</h3>
+        <p className="mb-4 text-sm text-slate-500">
+          {booking.doctor_name} · {booking.appointment_date} {booking.appointment_time}
+        </p>
+
+        <label className="mb-1 block text-xs font-medium text-slate-500">
+          Reason <span className="text-red-500">*</span>
+        </label>
+        <select
+          value={reason}
+          onChange={(e) => onReasonChange(e.target.value)}
+          className="mb-3 w-full rounded-xl border border-teal-900/10 bg-white/80 px-3.5 py-2.5 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/25"
+        >
+          <option value="">Select a reason…</option>
+          {CANCEL_REASONS.map((r) => (
+            <option key={r.value} value={r.value}>
+              {r.label}
+            </option>
+          ))}
+        </select>
+
+        {reason === "other" && (
+          <>
+            <label className="mb-1 block text-xs font-medium text-slate-500">
+              Please specify <span className="text-red-500">*</span>
+            </label>
+            <textarea
+              value={detail}
+              onChange={(e) => onDetailChange(e.target.value)}
+              rows={2}
+              placeholder="Tell us more…"
+              className="mb-3 w-full resize-none rounded-xl border border-teal-900/10 bg-white/80 px-3.5 py-2.5 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/25"
+            />
+          </>
+        )}
+
+        {error && <p className="mb-3 text-xs text-red-600">{error}</p>}
+
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 rounded-xl border border-teal-900/10 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+          >
+            Keep booking
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={!canSubmit || submitting}
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-red-500 py-2.5 text-sm font-semibold text-white transition hover:bg-red-600 active:scale-[0.99] disabled:opacity-50"
+          >
+            {submitting && (
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/60 border-t-transparent" />
+            )}
+            Confirm cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------
+// Existing chat components (unchanged)
+// ------------------------------------------------------------------
 
 function MessageRow({ msg }) {
   if (msg.role === "user") {
@@ -785,7 +1099,7 @@ function AuthScreen({ onAuth }) {
 
   const submit = async (e) => {
     e.preventDefault();
-    if (submitting) return; // guards against a double-click firing two requests
+    if (submitting) return;
 
     const n = name.trim();
     const em = email.trim();
@@ -827,7 +1141,6 @@ function AuthScreen({ onAuth }) {
 
   return (
     <div className="relative flex h-screen items-center justify-center overflow-hidden bg-[#f2f8f6] px-4 text-slate-800">
-      {/* same teal backdrop blobs as the main app */}
       <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="absolute -top-32 -left-24 h-96 w-96 rounded-full bg-teal-200/50 blur-3xl" />
         <div className="absolute top-1/3 -right-28 h-[28rem] w-[28rem] rounded-full bg-emerald-200/45 blur-3xl" />
@@ -849,7 +1162,6 @@ function AuthScreen({ onAuth }) {
         </div>
 
         <div className="rounded-2xl border border-white/70 bg-white/55 p-6 shadow-[0_8px_32px_rgba(15,110,86,0.10)] backdrop-blur-xl">
-          {/* Sign in / Sign up toggle */}
           <div className="mb-5 grid grid-cols-2 gap-1 rounded-xl border border-teal-900/10 bg-white/50 p-1">
             {[
               { key: "signin", label: "Sign in" },
@@ -945,6 +1257,25 @@ function LogoutIcon() {
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
       <path d="m16 17 5-5-5-5" />
       <path d="M21 12H9" />
+    </svg>
+  );
+}
+
+function CalendarIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+      <line x1="16" y1="2" x2="16" y2="6" />
+      <line x1="8" y1="2" x2="8" y2="6" />
+      <line x1="3" y1="10" x2="21" y2="10" />
+    </svg>
+  );
+}
+
+function XIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M18 6 6 18M6 6l12 12" />
     </svg>
   );
 }
