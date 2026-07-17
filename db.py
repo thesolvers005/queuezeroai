@@ -180,7 +180,26 @@ def book_slot(doctor_id, target_date, target_time, patient_name, patient_id=None
         "status": "booked",
         "is_emergency": is_emergency,
     }
-    inserted = client.table("appointments").insert(appointment).execute()
+    try:
+        inserted = client.table("appointments").insert(appointment).execute()
+    except Exception as exc:
+        err = str(exc)
+        # Postgres unique-violation code 23505 — another request just took this slot
+        if "23505" in err or "duplicate" in err.lower() or "unique" in err.lower():
+            alternatives = find_available_slots(doctor_id, days_ahead=7)
+            alternatives = [
+                s for s in alternatives
+                if not (s["date"] == target_date and s["time"] == target_time)
+            ][:3]
+            alt_str = ", ".join(f"{s['date']} {s['time']}" for s in alternatives)
+            return {
+                "success": False,
+                "error": (
+                    "That slot was just taken by another user. "
+                    f"Nearest alternatives: {alt_str or 'none found — try a different doctor'}"
+                ),
+            }
+        raise
 
     return {
         "success": True,
