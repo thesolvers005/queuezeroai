@@ -887,7 +887,7 @@ function MessageRow({ msg }) {
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-teal-700 px-4 py-2.5 text-sm leading-relaxed text-white shadow-sm">
+        <div className="max-w-[85%] rounded-xl rounded-br-sm bg-teal-700 px-3.5 py-2 text-sm leading-relaxed text-white shadow-sm">
           <p className="whitespace-pre-wrap">{msg.content}</p>
         </div>
       </div>
@@ -895,13 +895,13 @@ function MessageRow({ msg }) {
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       <div className="flex justify-start">
         <div
-          className={`max-w-[88%] rounded-2xl rounded-bl-md border px-4 py-2.5 text-sm leading-relaxed shadow-sm backdrop-blur ${
+          className={`max-w-[88%] rounded-xl rounded-bl-sm border px-3.5 py-2 text-sm leading-relaxed shadow-sm backdrop-blur ${
             msg.isError
               ? "border-red-200 bg-red-50/80 text-red-800"
-              : "border-teal-900/5 bg-white/80 text-slate-700"
+              : "border-teal-900/5 bg-white/80 text-slate-600"
           }`}
         >
           <p className="whitespace-pre-wrap">{msg.content}</p>
@@ -1111,23 +1111,43 @@ function LiveStepItem({ step, isLast }) {
   );
 }
 
+const CAPABILITIES = [
+  { icon: "🔍", label: "Real-time search",   body: "Queries live DB — doctors, ratings, wait times" },
+  { icon: "📋", label: "Autonomous booking", body: "Picks best option, locks slot, handles conflicts" },
+  { icon: "📧", label: "Email confirmation", body: "Sends to patient immediately after booking"       },
+  { icon: "🚨", label: "Emergency override", body: "Bypasses queue when situation is urgent"          },
+];
+
 function EmptyState({ onPick }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center px-4 text-center">
-      <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-teal-600 to-emerald-600 text-white shadow-lg shadow-teal-600/25">
-        <PulseIcon large />
+    <div className="flex h-full flex-col justify-center px-2 py-4">
+      <div className="mb-4 flex items-center gap-2.5">
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-teal-600 to-emerald-600 text-white shadow-md shadow-teal-600/20">
+          <PulseIcon />
+        </div>
+        <div>
+          <p className="text-sm font-semibold text-slate-800">QueueZero Agent</p>
+          <p className="text-xs text-teal-600">Searches · books · confirms</p>
+        </div>
       </div>
-      <h2 className="mb-1 text-xl font-bold text-slate-800">Ready to book your appointment?</h2>
-      <p className="mb-6 max-w-md text-sm text-slate-500">
-        Tell me the specialty, time and location you need — I'll compare doctors, wait times and
-        distance, then book the best slot for you.
-      </p>
-      <div className="flex w-full max-w-lg flex-col gap-2">
+
+      <div className="mb-4 grid grid-cols-2 gap-2">
+        {CAPABILITIES.map((c) => (
+          <div key={c.label} className="rounded-xl border border-teal-900/10 bg-white/60 p-3">
+            <p className="text-base leading-none">{c.icon}</p>
+            <p className="mt-1.5 text-xs font-semibold text-slate-700">{c.label}</p>
+            <p className="mt-0.5 text-[11px] text-slate-400">{c.body}</p>
+          </div>
+        ))}
+      </div>
+
+      <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Try these</p>
+      <div className="space-y-1.5">
         {EXAMPLES.map((ex) => (
           <button
             key={ex}
             onClick={() => onPick(ex)}
-            className="rounded-xl border border-teal-900/10 bg-white/70 px-4 py-2.5 text-left text-sm text-slate-600 backdrop-blur transition hover:border-teal-400 hover:bg-white hover:text-teal-800"
+            className="w-full rounded-lg border border-teal-900/10 bg-white/60 px-3.5 py-2 text-left text-xs text-slate-600 transition hover:border-teal-400 hover:bg-white hover:text-teal-800"
           >
             {ex}
           </button>
