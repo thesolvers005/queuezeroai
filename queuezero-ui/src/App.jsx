@@ -745,7 +745,8 @@ function Header({ health, user, onLogout, onShowBookings }) {
 // Bookings panel (slide-over from right)
 // ------------------------------------------------------------------
 function BookingsPanel({ bookings, loading, cancelCount, onClose, onCancel }) {
-  const today = new Date().toISOString().split("T")[0];
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   const upcoming = bookings.filter((b) => b.status !== "cancelled" && b.appointment_date >= today);
   const past = bookings.filter((b) => b.status === "cancelled" || b.appointment_date < today);
 
