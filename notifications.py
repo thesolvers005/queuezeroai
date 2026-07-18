@@ -27,11 +27,15 @@ except ImportError:  # SDK not installed — degrade gracefully, never crash
 
 def resolve_recipient(form_email):
     """Recipient for confirmation emails: the per-request form value if present,
-    else the PATIENT_EMAIL env var (demo convenience), else None.
+    else DEMO_EMAIL_OVERRIDE (forces every send to the sandbox-allowed address,
+    for the hackathon demo), else the PATIENT_EMAIL env var, else None.
 
     Pure function — takes the request's email and returns a value. No globals,
     so it is safe under concurrent requests.
     """
+    override = os.environ.get("DEMO_EMAIL_OVERRIDE", "").strip()
+    if override:
+        return override
     if isinstance(form_email, str) and form_email.strip():
         return form_email.strip()
     return os.environ.get("PATIENT_EMAIL", "").strip() or None
@@ -110,5 +114,7 @@ def send_confirmation_email(to_email, doctor, hospital, date, time, est_wait):
         logger.info("Confirmation email sent to %s (id=%s)", to_email, email_id)
         return {"sent": True, "email_id": email_id}
     except Exception as exc:
-        logger.warning("Confirmation email to %s failed: %s", to_email, exc)
-        return {"sent": False, "error": str(exc)}
+        detail = getattr(exc, "response", None)
+        body = getattr(detail, "text", None) or getattr(detail, "content", None) or str(exc)
+        logger.warning("Confirmation email to %s failed: %s", to_email, body)
+        return {"sent": False, "error": str(body)}
